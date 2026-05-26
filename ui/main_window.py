@@ -28,6 +28,7 @@ from core.config_manager import load_settings, save_settings
 from core.holiday_api import fetch_holiday_data
 from core.game_detector import is_fullscreen_app_running
 from ui.game_mode_settings_dialog import GameModeSettingsDialog
+from core.task_scheduler import schedule_task, cancel_task
 
 # ---- 任务类型常量 ----
 TASK_TYPES = {
@@ -650,13 +651,9 @@ class MainWindow(QMainWindow):
         self.fired_reminders.clear()
         self.is_shutting_down = False
 
-        # 使用OS级定时器确保锁屏时仍能执行（仅关机/重启任务）
+        # 使用任务计划程序确保系统睡眠时仍能执行（支持 /WAKE 唤醒）
         if self.task_type in ("shutdown", "restart"):
-            flag = "/s" if self.task_type == "shutdown" else "/r"
-            subprocess.Popen(
-                ["shutdown", flag, "/t", str(total_seconds)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            schedule_task(self.end_time, self.task_type)
 
         if self.current_mode == "预约模式" and self._is_holiday_date(QDate.currentDate()):
             self.holiday_label.show()
@@ -708,11 +705,8 @@ class MainWindow(QMainWindow):
 
     def _cancel_countdown(self):
         """取消倒计时，重置状态（按钮恢复蓝色）"""
-        # 取消OS级定时关机/重启
-        subprocess.Popen(
-            ["shutdown", "/a"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # 取消任务计划程序中的定时任务
+        cancel_task()
 
         # 重置游戏模式状态
         self.game_postponing = False
@@ -759,6 +753,9 @@ class MainWindow(QMainWindow):
                 self.remaining_seconds = 15 * 60
                 self.game_postponing = True
                 self.end_time = QDateTime.currentDateTime().addSecs(15 * 60)
+                cancel_task()
+                if self.task_type in ("shutdown", "restart"):
+                    schedule_task(self.end_time, self.task_type)
                 self._update_display()
                 return
 
@@ -768,6 +765,9 @@ class MainWindow(QMainWindow):
                 self.game_end_warning_shown = True
                 self.remaining_seconds = self.game_end_countdown
                 self.end_time = QDateTime.currentDateTime().addSecs(self.game_end_countdown)
+                cancel_task()
+                if self.task_type in ("shutdown", "restart"):
+                    schedule_task(self.end_time, self.task_type)
                 self._show_game_end_warning()
                 self._update_display()
                 return
@@ -832,17 +832,10 @@ class MainWindow(QMainWindow):
         self.remaining_seconds += seconds
         self.end_time = self.end_time.addSecs(seconds)
 
-        # 更新OS级定时器
+        # 重新调度任务计划程序
+        cancel_task()
         if self.task_type in ("shutdown", "restart"):
-            subprocess.Popen(
-                ["shutdown", "/a"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            flag = "/s" if self.task_type == "shutdown" else "/r"
-            subprocess.Popen(
-                ["shutdown", flag, "/t", str(self.remaining_seconds)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            schedule_task(self.end_time, self.task_type)
 
         self._update_display()
 
@@ -896,11 +889,8 @@ class MainWindow(QMainWindow):
         action = self._task_action_name
         # 保存 schedule_active 等状态，确保下次开机可恢复
         self._save_all_settings()
-        # 取消OS级定时器以免冲突
-        subprocess.Popen(
-            ["shutdown", "/a"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # 取消任务计划程序中的定时任务以免冲突
+        cancel_task()
         try:
             subprocess.Popen(TASK_COMMANDS[self.task_type])
         except Exception as e:
@@ -920,11 +910,8 @@ class MainWindow(QMainWindow):
         self.action_btn.setText(self._get_start_btn_text())
         self.action_btn.setStyleSheet("")
 
-        # 取消OS级定时器
-        subprocess.Popen(
-            ["shutdown", "/a"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # 取消任务计划程序中的定时任务
+        cancel_task()
         try:
             subprocess.Popen(["shutdown", "/s", "/t", "0"])
         except Exception as e:
@@ -1106,11 +1093,8 @@ class MainWindow(QMainWindow):
         self.low_battery_end_time = QDateTime.currentDateTime().addSecs(60)
         self.low_battery_percentage = percentage
 
-        # 使用OS级定时器，确保障眠/锁屏时仍能执行
-        subprocess.Popen(
-            ["shutdown", "/s", "/t", "60"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # 使用任务计划程序确保障眠/锁屏时仍能执行
+        schedule_task(QDateTime.currentDateTime().addSecs(60), "shutdown")
 
         # 弹出与倒计时关机相同的提醒窗口
         self._show_low_battery_reminder()
@@ -1171,11 +1155,8 @@ class MainWindow(QMainWindow):
         self.low_battery_remaining = 0
         self.low_battery_end_time = None
 
-        # 取消OS级定时关机
-        subprocess.Popen(
-            ["shutdown", "/a"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # 取消任务计划程序中的定时关机
+        cancel_task()
 
         if self.low_battery_dialog:
             try:
@@ -1194,15 +1175,10 @@ class MainWindow(QMainWindow):
         self.low_battery_remaining += seconds
         self.low_battery_end_time = self.low_battery_end_time.addSecs(seconds)
 
-        # 重新调度OS级定时器
-        subprocess.Popen(
-            ["shutdown", "/a"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        subprocess.Popen(
-            ["shutdown", "/s", "/t", str(self.low_battery_remaining)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # 重新调度任务计划程序
+        cancel_task()
+        if self.low_battery_end_time:
+            schedule_task(self.low_battery_end_time, "shutdown")
 
         if self.low_battery_dialog:
             try:
