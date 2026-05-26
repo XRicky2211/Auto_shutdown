@@ -79,6 +79,13 @@ class MainWindow(QMainWindow):
         self.low_battery_threshold = 15
         self.low_battery_warned = False
         self.low_battery_disabled = False
+        self.low_battery_countdown_active = False
+        self.low_battery_remaining = 0
+        self.low_battery_end_time = None
+        self.low_battery_dialog = None
+        self.low_battery_timer = QTimer(self)
+        self.low_battery_timer.setInterval(1000)
+        self.low_battery_timer.timeout.connect(self._on_low_battery_tick)
         self.holidays: set = set()
         self.holiday_periods: list = []
         self.holiday_skip_enabled = False
@@ -642,6 +649,14 @@ class MainWindow(QMainWindow):
         self.fired_reminders.clear()
         self.is_shutting_down = False
 
+        # 使用OS级定时器确保锁屏时仍能执行（仅关机/重启任务）
+        if self.task_type in ("shutdown", "restart"):
+            flag = "/s" if self.task_type == "shutdown" else "/r"
+            subprocess.Popen(
+                ["shutdown", flag, "/t", str(total_seconds)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
         if self.current_mode == "预约模式" and self._is_holiday_date(QDate.currentDate()):
             self.holiday_label.show()
         else:
@@ -692,6 +707,12 @@ class MainWindow(QMainWindow):
 
     def _cancel_countdown(self):
         """取消倒计时，重置状态（按钮恢复蓝色）"""
+        # 取消OS级定时关机/重启
+        subprocess.Popen(
+            ["shutdown", "/a"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
         # 重置游戏模式状态
         self.game_postponing = False
         self.game_end_warning_shown = False
@@ -809,6 +830,19 @@ class MainWindow(QMainWindow):
         seconds = minutes * 60
         self.remaining_seconds += seconds
         self.end_time = self.end_time.addSecs(seconds)
+
+        # 更新OS级定时器
+        if self.task_type in ("shutdown", "restart"):
+            subprocess.Popen(
+                ["shutdown", "/a"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            flag = "/s" if self.task_type == "shutdown" else "/r"
+            subprocess.Popen(
+                ["shutdown", flag, "/t", str(self.remaining_seconds)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
         self._update_display()
 
     # ======================== 游戏结束警告 ========================
@@ -861,6 +895,11 @@ class MainWindow(QMainWindow):
         action = self._task_action_name
         # 保存 schedule_active 等状态，确保下次开机可恢复
         self._save_all_settings()
+        # 取消OS级定时器以免冲突
+        subprocess.Popen(
+            ["shutdown", "/a"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         try:
             subprocess.Popen(TASK_COMMANDS[self.task_type])
         except Exception as e:
@@ -875,9 +914,16 @@ class MainWindow(QMainWindow):
         self.is_shutting_down = True
         self.timer.stop()
         self.is_counting = False
+        self.low_battery_timer.stop()
+        self.low_battery_countdown_active = False
         self.action_btn.setText(self._get_start_btn_text())
         self.action_btn.setStyleSheet("")
 
+        # 取消OS级定时器
+        subprocess.Popen(
+            ["shutdown", "/a"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         try:
             subprocess.Popen(["shutdown", "/s", "/t", "0"])
         except Exception as e:
@@ -1025,7 +1071,7 @@ class MainWindow(QMainWindow):
         self._check_battery()
 
     def _check_battery(self):
-        """检测电池状态并更新显示，条件满足时弹出低电量警告"""
+        """检测电池状态并更新显示，电量低于阈值时启动60秒倒计时关机"""
         status = self.battery_monitor.get_status()
         if status is None:
             self.battery_label.setText("当前电量：--")
@@ -1040,35 +1086,150 @@ class MainWindow(QMainWindow):
         else:
             self.battery_label.setText(f"当前电量：{percentage:.0f}% (未接通)")
 
-        # 检查是否需要低电量警告
+        # 低电量检测
         if self.low_battery_enabled and not self.low_battery_disabled:
             if not plugged and percentage <= self.low_battery_threshold:
-                if not self.low_battery_warned:
-                    self._show_low_battery_warning(percentage)
+                if not self.low_battery_warned and not self.low_battery_countdown_active:
+                    self._start_low_battery_countdown()
             else:
-                # 条件不满足时重置警告，以便下次再次触发
+                # 条件恢复（接通电源或电量回升）
                 self.low_battery_warned = False
+                if self.low_battery_countdown_active:
+                    self._cancel_low_battery_countdown(was_recovery=True)
 
-    def _show_low_battery_warning(self, percentage: float):
-        """弹出低电量警告弹窗"""
+    def _start_low_battery_countdown(self):
+        """电量低于阈值时启动60秒倒计时关机"""
         self.low_battery_warned = True
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("低电量提醒")
-        msg.setText(f"电池电量仅剩 {percentage:.0f}%，且未接通电源。")
-        msg.setInformativeText("建议立即保存工作。")
+        self.low_battery_countdown_active = True
+        self.low_battery_remaining = 60
+        self.low_battery_end_time = QDateTime.currentDateTime().addSecs(60)
 
-        msg.addButton("暂不处理", QMessageBox.RejectRole)
-        shutdown_btn = msg.addButton("立即关机", QMessageBox.AcceptRole)
-        disable_btn = msg.addButton("本次禁用", QMessageBox.DestructiveRole)
+        # 使用OS级定时器，确保障眠/锁屏时仍能执行
+        subprocess.Popen(
+            ["shutdown", "/s", "/t", "60"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
-        msg.exec()
+        # 弹出与倒计时关机相同的提醒窗口
+        self._show_low_battery_reminder()
 
-        if msg.clickedButton() == shutdown_btn:
+        self.low_battery_timer.start()
+        self._update_battery_tray_warning(True)
+
+    def _show_low_battery_reminder(self):
+        """显示低电量倒计时提醒弹窗（复用ReminderDialog）"""
+        if self.low_battery_dialog:
+            try:
+                self.low_battery_dialog.close()
+            except RuntimeError:
+                pass
+            self.low_battery_dialog = None
+
+        dialog = ReminderDialog(
+            1, self.delay_minutes, "关机",
+            end_time=self.low_battery_end_time,
+            remaining_seconds=self.low_battery_remaining,
+            parent=self,
+        )
+        dialog.cancelled.connect(lambda: self._cancel_low_battery_countdown(was_recovery=False))
+        dialog.delayed.connect(self._delay_low_battery_countdown)
+        dialog.confirmed.connect(self._close_low_battery_dialog)
+        dialog.finished.connect(lambda d=dialog: self._on_low_battery_dialog_closed(d))
+
+        self.low_battery_dialog = dialog
+        dialog.show()
+
+    def _on_low_battery_tick(self):
+        """低电量倒计时每秒触发"""
+        if not self.low_battery_countdown_active:
+            self.low_battery_timer.stop()
+            return
+
+        remaining = QDateTime.currentDateTime().secsTo(self.low_battery_end_time)
+        self.low_battery_remaining = remaining if remaining >= 0 else 0
+
+        if self.low_battery_remaining <= 0:
+            self.low_battery_timer.stop()
+            self.low_battery_countdown_active = False
             self._execute_shutdown()
-        elif msg.clickedButton() == disable_btn:
-            self.low_battery_disabled = True
-        # "暂不处理"：不做任何事，warned 标记保持为 True 避免重复打扰
+            return
+
+        # 弹窗已关闭，但在最后10秒重新弹出以提醒用户
+        if (self.low_battery_dialog is None
+                and self.low_battery_remaining <= 10
+                and self.low_battery_remaining > 0):
+            self._show_low_battery_reminder()
+
+    def _cancel_low_battery_countdown(self, was_recovery=False):
+        """取消低电量倒计时"""
+        self.low_battery_timer.stop()
+        self.low_battery_countdown_active = False
+        self.low_battery_remaining = 0
+        self.low_battery_end_time = None
+
+        # 取消OS级定时关机
+        subprocess.Popen(
+            ["shutdown", "/a"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+        if self.low_battery_dialog:
+            try:
+                self.low_battery_dialog.close()
+            except RuntimeError:
+                pass
+            self.low_battery_dialog = None
+
+        if not was_recovery:
+            self.low_battery_warned = True  # 避免立即再次触发
+        self._update_battery_tray_warning(False)
+
+    def _delay_low_battery_countdown(self, minutes: int):
+        """推迟低电量关机"""
+        seconds = minutes * 60
+        self.low_battery_remaining += seconds
+        self.low_battery_end_time = self.low_battery_end_time.addSecs(seconds)
+
+        # 重新调度OS级定时器
+        subprocess.Popen(
+            ["shutdown", "/a"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.Popen(
+            ["shutdown", "/s", "/t", str(self.low_battery_remaining)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+        if self.low_battery_dialog:
+            try:
+                self.low_battery_dialog.close()
+            except RuntimeError:
+                pass
+            self.low_battery_dialog = None
+
+    def _close_low_battery_dialog(self):
+        """确认预约：关闭弹窗，倒计时继续"""
+        if self.low_battery_dialog:
+            try:
+                self.low_battery_dialog.close()
+            except RuntimeError:
+                pass
+            self.low_battery_dialog = None
+
+    def _on_low_battery_dialog_closed(self, dialog):
+        """弹窗销毁后的清理"""
+        if self.low_battery_dialog is dialog:
+            self.low_battery_dialog = None
+
+    def _update_battery_tray_warning(self, active: bool):
+        """更新系统托盘的低电量状态提示"""
+        if active and hasattr(self, 'tray_icon'):
+            self.tray_icon.showMessage(
+                "低电量提醒",
+                "电池电量过低，系统将在60秒后自动关机。",
+                QSystemTrayIcon.MessageIcon.Warning,
+                10000,
+            )
 
     def _open_battery_settings(self):
         """打开低电量设置弹窗"""
@@ -1080,6 +1241,11 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self.low_battery_enabled = dialog.is_enabled()
             self.low_battery_threshold = dialog.get_threshold()
+
+            # 如果在倒计时中禁用了低电量，取消倒计时
+            if not self.low_battery_enabled and self.low_battery_countdown_active:
+                self._cancel_low_battery_countdown(was_recovery=True)
+
             if not self.low_battery_enabled:
                 self.low_battery_warned = False
                 self.low_battery_disabled = False

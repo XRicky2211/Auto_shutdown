@@ -48,12 +48,12 @@ class BatterySettingsDialog(QDialog):
         self.threshold_spin.setEnabled(self._enabled)
         threshold_layout.addWidget(self.threshold_spin)
 
-        threshold_layout.addWidget(QLabel("且未接通电源时自动关机"))
+        threshold_layout.addWidget(QLabel("且未接通电源时启动倒计时关机"))
         threshold_layout.addStretch()
         layout.addLayout(threshold_layout)
 
         # ---- 提示文字 ----
-        note = QLabel("注：系统每 3 分钟检测一次电池状态")
+        note = QLabel("注：系统每 3 分钟检测一次电池状态，低于阈值时弹出60秒倒计时提醒")
         note.setStyleSheet("color: #868E96; font-size: 11px;")
         layout.addWidget(note)
 
