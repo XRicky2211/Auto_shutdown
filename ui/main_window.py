@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self.low_battery_remaining = 0
         self.low_battery_end_time = None
         self.low_battery_dialog = None
+        self.low_battery_percentage = 0
         self.low_battery_timer = QTimer(self)
         self.low_battery_timer.setInterval(1000)
         self.low_battery_timer.timeout.connect(self._on_low_battery_tick)
@@ -1090,19 +1091,20 @@ class MainWindow(QMainWindow):
         if self.low_battery_enabled and not self.low_battery_disabled:
             if not plugged and percentage <= self.low_battery_threshold:
                 if not self.low_battery_warned and not self.low_battery_countdown_active:
-                    self._start_low_battery_countdown()
+                    self._start_low_battery_countdown(percentage)
             else:
                 # 条件恢复（接通电源或电量回升）
                 self.low_battery_warned = False
                 if self.low_battery_countdown_active:
                     self._cancel_low_battery_countdown(was_recovery=True)
 
-    def _start_low_battery_countdown(self):
+    def _start_low_battery_countdown(self, percentage: float = 0):
         """电量低于阈值时启动60秒倒计时关机"""
         self.low_battery_warned = True
         self.low_battery_countdown_active = True
         self.low_battery_remaining = 60
         self.low_battery_end_time = QDateTime.currentDateTime().addSecs(60)
+        self.low_battery_percentage = percentage
 
         # 使用OS级定时器，确保障眠/锁屏时仍能执行
         subprocess.Popen(
@@ -1130,6 +1132,7 @@ class MainWindow(QMainWindow):
             end_time=self.low_battery_end_time,
             remaining_seconds=self.low_battery_remaining,
             parent=self,
+            title_text=f"电量低于 {self.low_battery_threshold}%（当前 {self.low_battery_percentage:.0f}%），已启动自动关机",
         )
         dialog.cancelled.connect(lambda: self._cancel_low_battery_countdown(was_recovery=False))
         dialog.delayed.connect(self._delay_low_battery_countdown)
@@ -1137,6 +1140,7 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(lambda d=dialog: self._on_low_battery_dialog_closed(d))
 
         self.low_battery_dialog = dialog
+        dialog.setWindowTitle("低电量提醒")
         dialog.show()
 
     def _on_low_battery_tick(self):

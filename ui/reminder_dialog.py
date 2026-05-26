@@ -16,7 +16,8 @@ class ReminderDialog(QDialog):
     confirmed = Signal()       # 确认预约（倒计时继续，到点自动执行）
 
     def __init__(self, minutes_before: int, delay_minutes: int, action_name: str = "关机",
-                 end_time=None, remaining_seconds: int = 0, parent=None):
+                 end_time=None, remaining_seconds: int = 0, parent=None,
+                 title_text=None):
         """
         参数：
             minutes_before: 距离关机的分钟数（显示用）
@@ -24,11 +25,13 @@ class ReminderDialog(QDialog):
             action_name:    任务类型名称（关机/重启/注销/睡眠/休眠）
             end_time:       任务执行的具体时间 (QDateTime)
             remaining_seconds: 剩余秒数
+            title_text:     自定义标题文字（设置后替换顶部的执行时间文字）
         """
         super().__init__(parent)
         self._action_name = action_name
         self._remaining_seconds = remaining_seconds
         self._end_time = end_time
+        self._title_text = title_text
         self.setWindowTitle(f"{action_name}提醒")
         self.setFixedSize(360, 180)
 
@@ -55,7 +58,7 @@ class ReminderDialog(QDialog):
             return
         remain_str = self._format_remaining(self._remaining_seconds)
         self._remain_label.setText(f"剩余 {remain_str}")
-        if self._end_time:
+        if self._end_time and not self._title_text:
             self._exec_label.setText(
                 f"将于 {self._end_time.toString('HH:mm:ss')} 执行{self._action_name}任务"
             )
@@ -85,9 +88,13 @@ class ReminderDialog(QDialog):
         tl.setContentsMargins(12, 8, 12, 8)
         tl.setSpacing(4)
 
-        # 执行时间
-        end_str = end_time.toString("HH:mm:ss") if end_time else "--:--:--"
-        self._exec_label = QLabel(f"将于 {end_str} 执行{self._action_name}任务")
+        # 标题文字（自定义或默认显示执行时间）
+        if self._title_text:
+            default_text = self._title_text
+        else:
+            end_str = end_time.toString("HH:mm:ss") if end_time else "--:--:--"
+            default_text = f"将于 {end_str} 执行{self._action_name}任务"
+        self._exec_label = QLabel(default_text)
         self._exec_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1C7ED6; border: none;")
         self._exec_label.setAlignment(Qt.AlignCenter)
         tl.addWidget(self._exec_label)
