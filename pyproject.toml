@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-shutdown"
+version = "1.0.0"
+description = "Windows 定时关机助手——支持低电量关机、节假日跳过、游戏模式等多种功能"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Ricky"},
+]
+keywords = [
+    "auto-shutdown", "shutdown-timer", "windows", "pyside6",
+    "定时关机", "自动关机", "windows-utility",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Chinese (Simplified)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+    "Topic :: System :: Power (UPS)",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "PySide6>=6.6",
+    "psutil>=5.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/XRicky2211/Auto_shutdown"
+Repository = "https://github.com/XRicky2211/Auto_shutdown"
+Issues = "https://github.com/XRicky2211/Auto_shutdown/issues"
+
+[tool.setuptools.packages.find]
+include = ["core*", "ui*"]
