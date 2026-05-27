@@ -28,7 +28,11 @@ from core.config_manager import load_settings, save_settings
 from core.holiday_api import fetch_holiday_data
 from core.game_detector import is_fullscreen_app_running
 from ui.game_mode_settings_dialog import GameModeSettingsDialog
-from core.task_scheduler import schedule_task, cancel_task
+from core.task_scheduler import (
+    schedule_task, cancel_task,
+    schedule_low_battery_task, cancel_low_battery_task,
+)
+from core.power_manager import prevent_sleep, allow_sleep
 
 # ---- 任务类型常量 ----
 TASK_TYPES = {
@@ -46,6 +50,12 @@ TASK_COMMANDS = {
     "sleep": ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,0,0"],
     "hibernate": ["shutdown", "/h"],
 }
+
+# 开始阻止睡眠的剩余时间阈值（秒）
+_SLEEP_PREVENT_THRESHOLD = 300
+# 电池检测间隔
+_BATTERY_CHECK_ACTIVE_MS = 60000   # 阻止睡眠时：1 分钟
+_BATTERY_CHECK_NORMAL_MS = 180000  # 正常状态：3 分钟
 
 
 class MainWindow(QMainWindow):
@@ -92,6 +102,9 @@ class MainWindow(QMainWindow):
         self.holiday_periods: list = []
         self.holiday_skip_enabled = False
         self.auto_start_enabled = False
+
+        # ---- 睡眠阻止 ----
+        self._sleep_prevention_active = False
 
         # ---- 每周定时自动恢复 ----
         self.schedule_active = False
@@ -342,6 +355,36 @@ class MainWindow(QMainWindow):
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self._on_tick)
 
+    # ======================== 睡眠阻止 ========================
+
+    def _update_sleep_prevention(self):
+        """根据当前倒计时状态决定是否阻止系统睡眠。
+
+        规则：
+          - 低电量倒计时活跃 → 立即阻止（窗口只有60秒）
+          - 定时倒计时剩余 ≤ 5 分钟 → 阻止睡眠
+          - 否则 → 允许正常睡眠
+        阻止睡眠时同步加速电池检测到 1 分钟间隔。
+        """
+        should_block = (
+            self.low_battery_countdown_active or
+            (self.is_counting and self.remaining_seconds <= _SLEEP_PREVENT_THRESHOLD)
+        )
+
+        if should_block and not self._sleep_prevention_active:
+            if self.low_battery_countdown_active:
+                reason = f"低电量自动关机倒计时（剩余 {self.low_battery_remaining} 秒）"
+            else:
+                reason = f"定时{self._task_action_name}倒计时（剩余 {self.remaining_seconds} 秒）"
+            prevent_sleep(reason=reason)
+            self._sleep_prevention_active = True
+            self.battery_timer.setInterval(_BATTERY_CHECK_ACTIVE_MS)
+
+        elif not should_block and self._sleep_prevention_active:
+            allow_sleep()
+            self._sleep_prevention_active = False
+            self.battery_timer.setInterval(_BATTERY_CHECK_NORMAL_MS)
+
     # ======================== 设置摘要（底部小字） ========================
 
     @property
@@ -528,7 +571,7 @@ class MainWindow(QMainWindow):
     def _get_startup_command() -> str:
         """获取开机自启的完整命令行"""
         if getattr(sys, "frozen", False):
-            return sys.executable
+            return f'"{sys.executable}"'
         pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
         script = os.path.abspath(sys.argv[0])
         return f'"{pythonw}" "{script}"'
@@ -663,6 +706,9 @@ class MainWindow(QMainWindow):
         self.is_counting = True
         self.action_btn.setText(self._get_cancel_btn_text())
 
+        # 若剩余时间已在阈值内，立即阻止睡眠
+        self._update_sleep_prevention()
+
         # 每周定时计划启动后标记为"活跃"，便于开机自动恢复
         if self.current_mode == "预约模式" and self.schedule_plan["type"] == "weekly":
             self.schedule_active = True
@@ -729,6 +775,7 @@ class MainWindow(QMainWindow):
         self.schedule_active = False
         self._save_all_settings()
         self._update_tray_menu()
+        self._update_sleep_prevention()
 
     # ======================== 倒计时核心逻辑 ========================
 
@@ -740,6 +787,9 @@ class MainWindow(QMainWindow):
         # 用 end_time 重新计算剩余时间，消除 timer 不准带来的累积误差
         remaining = QDateTime.currentDateTime().secsTo(self.end_time)
         self.remaining_seconds = remaining if remaining >= 0 else 0
+
+        # 检查是否需要开始/停止阻止睡眠（跨越 5 分钟阈值时切换）
+        self._update_sleep_prevention()
 
         if self.remaining_seconds <= 0:
             # ① 游戏模式：警告已显示过 → 执行任务（无论游戏是否再运行）
@@ -756,6 +806,7 @@ class MainWindow(QMainWindow):
                 cancel_task()
                 if self.task_type in ("shutdown", "restart"):
                     schedule_task(self.end_time, self.task_type)
+                self._update_sleep_prevention()
                 self._update_display()
                 return
 
@@ -768,6 +819,7 @@ class MainWindow(QMainWindow):
                 cancel_task()
                 if self.task_type in ("shutdown", "restart"):
                     schedule_task(self.end_time, self.task_type)
+                self._update_sleep_prevention()
                 self._show_game_end_warning()
                 self._update_display()
                 return
@@ -838,6 +890,7 @@ class MainWindow(QMainWindow):
             schedule_task(self.end_time, self.task_type)
 
         self._update_display()
+        self._update_sleep_prevention()
 
     # ======================== 游戏结束警告 ========================
 
@@ -891,6 +944,9 @@ class MainWindow(QMainWindow):
         self._save_all_settings()
         # 取消任务计划程序中的定时任务以免冲突
         cancel_task()
+        # 释放电源请求后执行关机
+        self._sleep_prevention_active = False
+        allow_sleep()
         try:
             subprocess.Popen(TASK_COMMANDS[self.task_type])
         except Exception as e:
@@ -912,6 +968,10 @@ class MainWindow(QMainWindow):
 
         # 取消任务计划程序中的定时任务
         cancel_task()
+        cancel_low_battery_task()
+        # 释放电源请求后执行关机
+        self._sleep_prevention_active = False
+        allow_sleep()
         try:
             subprocess.Popen(["shutdown", "/s", "/t", "0"])
         except Exception as e:
@@ -1042,6 +1102,9 @@ class MainWindow(QMainWindow):
         """从托盘菜单退出程序"""
         self.timer.stop()
         self.is_counting = False
+        # 释放所有电源请求
+        self._sleep_prevention_active = False
+        allow_sleep()
         if self.reminder_dialog and self.reminder_dialog.isVisible():
             self.reminder_dialog.close()
             self.reminder_dialog = None
@@ -1050,10 +1113,10 @@ class MainWindow(QMainWindow):
     # ======================== 低电量自动关机 ========================
 
     def _setup_battery_monitor(self):
-        """创建电池检测器（每 3 分钟检测一次）"""
+        """创建电池检测器（正常 3 分钟 / 阻止睡眠时 1 分钟）"""
         self.battery_monitor = BatteryMonitor()
         self.battery_timer = QTimer(self)
-        self.battery_timer.setInterval(180000)  # 3 分钟
+        self.battery_timer.setInterval(_BATTERY_CHECK_NORMAL_MS)
         self.battery_timer.timeout.connect(self._check_battery)
         self.battery_timer.start()
         self._check_battery()
@@ -1096,11 +1159,15 @@ class MainWindow(QMainWindow):
         # 使用任务计划程序确保障眠/锁屏时仍能执行
         schedule_task(QDateTime.currentDateTime().addSecs(60), "shutdown")
 
+        # 创建定期巡检任务（每5分钟检测电量），睡眠时也能唤醒执行
+        schedule_low_battery_task(self.low_battery_threshold)
+
         # 弹出与倒计时关机相同的提醒窗口
         self._show_low_battery_reminder()
 
         self.low_battery_timer.start()
         self._update_battery_tray_warning(True)
+        self._update_sleep_prevention()
 
     def _show_low_battery_reminder(self):
         """显示低电量倒计时提醒弹窗（复用ReminderDialog）"""
@@ -1158,6 +1225,9 @@ class MainWindow(QMainWindow):
         # 取消任务计划程序中的定时关机
         cancel_task()
 
+        # 取消低电量巡检任务
+        cancel_low_battery_task()
+
         if self.low_battery_dialog:
             try:
                 self.low_battery_dialog.close()
@@ -1168,6 +1238,7 @@ class MainWindow(QMainWindow):
         if not was_recovery:
             self.low_battery_warned = True  # 避免立即再次触发
         self._update_battery_tray_warning(False)
+        self._update_sleep_prevention()
 
     def _delay_low_battery_countdown(self, minutes: int):
         """推迟低电量关机"""
@@ -1186,6 +1257,7 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
             self.low_battery_dialog = None
+        self._update_sleep_prevention()
 
     def _close_low_battery_dialog(self):
         """确认预约：关闭弹窗，倒计时继续"""

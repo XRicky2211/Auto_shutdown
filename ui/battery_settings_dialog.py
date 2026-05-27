@@ -53,7 +53,7 @@ class BatterySettingsDialog(QDialog):
         layout.addLayout(threshold_layout)
 
         # ---- 提示文字 ----
-        note = QLabel("注：系统每 3 分钟检测一次电池状态，低于阈值时弹出60秒倒计时提醒")
+        note = QLabel("注：系统每 1-3 分钟检测一次电池状态（倒计时期间 1 分钟，正常 3 分钟），低于阈值时弹出60秒倒计时提醒")
         note.setStyleSheet("color: #868E96; font-size: 11px;")
         layout.addWidget(note)
 
