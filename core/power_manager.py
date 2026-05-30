@@ -11,6 +11,15 @@ import atexit
 import ctypes
 from ctypes import wintypes
 
+# InitiateShutdown 所需的常量
+SHUTDOWN_FORCE_OTHERS = 0x00000001
+SHUTDOWN_POWEROFF = 0x00000008
+SHUTDOWN_RESTART = 0x00000004
+SHUTDOWN_HYBRID = 0x00000200
+
+SHTDN_REASON_MAJOR_APPLICATION = 0x00040000
+SHTDN_REASON_FLAG_PLANNED = 0x80000000
+
 
 # ---- 常量 ----
 
@@ -137,6 +146,112 @@ def allow_sleep() -> bool:
 def is_sleep_blocked() -> bool:
     """查询当前是否正在阻止系统睡眠"""
     return _power_manager.is_sleep_blocked()
+
+
+# ======================== 直接执行关机/重启（Win32 API） ========================
+
+def _enable_shutdown_privilege() -> bool:
+    """启用当前进程的 SE_SHUTDOWN_NAME 特权。"""
+    try:
+        advapi32 = ctypes.windll.advapi32
+        kernel32 = ctypes.windll.kernel32
+
+        h_token = wintypes.HANDLE()
+        TOKEN_ADJUST_PRIVILEGES = 0x0020
+        TOKEN_QUERY = 0x0008
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            ctypes.byref(h_token),
+        ):
+            return False
+
+        luid = wintypes.LUID()
+        if not advapi32.LookupPrivilegeValueW(None, "SeShutdownPrivilege", ctypes.byref(luid)):
+            return False
+
+        SE_PRIVILEGE_ENABLED = 0x00000002
+
+        class LUID_AND_ATTRIBUTES(ctypes.Structure):
+            _fields_ = [
+                ("Luid", wintypes.LUID),
+                ("Attributes", wintypes.DWORD),
+            ]
+
+        class TOKEN_PRIVILEGES(ctypes.Structure):
+            _fields_ = [
+                ("PrivilegeCount", wintypes.DWORD),
+                ("Privileges", LUID_AND_ATTRIBUTES * 1),
+            ]
+
+        tp = TOKEN_PRIVILEGES()
+        tp.PrivilegeCount = 1
+        tp.Privileges[0] = LUID_AND_ATTRIBUTES()
+        tp.Privileges[0].Luid = luid
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+
+        if not advapi32.AdjustTokenPrivileges(h_token, False, ctypes.byref(tp), 0, None, None):
+            return False
+
+        kernel32.CloseHandle(h_token)
+        return True
+    except Exception:
+        return False
+
+
+def force_shutdown():
+    """通过 Win32 InitiateShutdown API 直接关机，不依赖 shutdown.exe。
+
+    在 Modern Standby (S0) 系统上，subprocess.Popen(shutdown.exe) 可能
+    因系统重新进入低功耗空闲状态而失败。此 API 直接向 Windows 发送关机
+    请求，可靠性更高。
+    """
+    try:
+        advapi32 = ctypes.windll.advapi32
+        _enable_shutdown_privilege()
+
+        func = advapi32.InitiateShutdownW
+        func.argtypes = [
+            wintypes.LPCWSTR,  # lpMachineName
+            wintypes.LPCWSTR,  # lpMessage
+            wintypes.DWORD,    # dwGracePeriod
+            wintypes.DWORD,    # dwShutdownFlags
+            wintypes.DWORD,    # dwReason
+        ]
+        func.restype = wintypes.BOOL
+
+        flags = SHUTDOWN_FORCE_OTHERS | SHUTDOWN_POWEROFF
+        reason = SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_FLAG_PLANNED
+
+        result = func(None, None, 0, flags, reason)
+        return bool(result)
+    except Exception:
+        return False
+
+
+def force_restart():
+    """通过 Win32 InitiateShutdown API 直接重启系统。"""
+    try:
+        advapi32 = ctypes.windll.advapi32
+        _enable_shutdown_privilege()
+
+        func = advapi32.InitiateShutdownW
+        func.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        func.restype = wintypes.BOOL
+
+        flags = SHUTDOWN_FORCE_OTHERS | SHUTDOWN_RESTART
+        reason = SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_FLAG_PLANNED
+
+        result = func(None, None, 0, flags, reason)
+        return bool(result)
+    except Exception:
+        return False
 
 
 # ---- 退出时自动清理 ----

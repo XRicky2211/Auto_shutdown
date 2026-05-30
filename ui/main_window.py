@@ -32,7 +32,7 @@ from core.task_scheduler import (
     schedule_task, cancel_task,
     schedule_low_battery_task, cancel_low_battery_task,
 )
-from core.power_manager import prevent_sleep, allow_sleep
+from core.power_manager import prevent_sleep, allow_sleep, force_shutdown, force_restart
 
 # ---- 任务类型常量 ----
 TASK_TYPES = {
@@ -942,17 +942,35 @@ class MainWindow(QMainWindow):
         action = self._task_action_name
         # 保存 schedule_active 等状态，确保下次开机可恢复
         self._save_all_settings()
-        # 取消任务计划程序中的定时任务以免冲突
-        cancel_task()
-        # 释放电源请求后执行关机
-        self._sleep_prevention_active = False
-        allow_sleep()
-        try:
-            subprocess.Popen(TASK_COMMANDS[self.task_type], creationflags=subprocess.CREATE_NO_WINDOW)
-        except Exception as e:
-            QMessageBox.critical(self, f"{action}失败", f"执行{action}命令时出错：\n{e}")
-            self.is_shutting_down = False
-            self._update_tray_menu()
+
+        # ---- 关机/重启：使用 Win32 API 直接执行（不依赖 shutdown.exe） ----
+        # 在 Modern Standby 系统上，subprocess.Popen(shutdown.exe) 可能因
+        # 系统重新进入低功耗空闲状态而失败。InitiateShutdown API 直接在
+        # Windows 内核层面发出关机请求，更可靠。
+        if self.task_type == "shutdown":
+            ok = force_shutdown()
+        elif self.task_type == "restart":
+            ok = force_restart()
+        else:
+            ok = False
+
+        if not ok:
+            # Win32 API 失败时回退到传统的 shutdown.exe
+            try:
+                subprocess.Popen(TASK_COMMANDS[self.task_type],
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception as e:
+                QMessageBox.critical(self, f"{action}失败",
+                                     f"执行{action}命令时出错：\n{e}")
+                self.is_shutting_down = False
+                self._update_tray_menu()
+                return
+
+        # 不取消 schtasks 任务计划，让它作为备份机制：
+        #   - 若系统睡眠中，schtasks 的 /WAKE 可唤醒系统并执行关机
+        #   - 若上面 API/shell 命令已成功，schtasks 也会触发但无害
+        # 同时保留睡眠阻止直到关机确认（防止 Win32 API 发送请求后系统再入睡）
+        # 注意：系统正在关闭，不释放 sleep_lock 也没关系
 
     def _execute_shutdown(self):
         """始终执行关机（用于低电量等场景）"""
@@ -966,18 +984,19 @@ class MainWindow(QMainWindow):
         self.action_btn.setText(self._get_start_btn_text())
         self.action_btn.setStyleSheet("")
 
-        # 取消任务计划程序中的定时任务
-        cancel_task()
-        cancel_low_battery_task()
-        # 释放电源请求后执行关机
-        self._sleep_prevention_active = False
-        allow_sleep()
-        try:
-            subprocess.Popen(["shutdown", "/s", "/t", "0"], creationflags=subprocess.CREATE_NO_WINDOW)
-        except Exception as e:
-            QMessageBox.critical(self, "关机失败", f"执行关机命令时出错：\n{e}")
-            self.is_shutting_down = False
-            self._update_tray_menu()
+        # ---- 使用 Win32 API 直接关机（更可靠） ----
+        ok = force_shutdown()
+        if not ok:
+            try:
+                subprocess.Popen(["shutdown", "/s", "/t", "0"],
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception as e:
+                QMessageBox.critical(self, "关机失败", f"执行关机命令时出错：\n{e}")
+                self.is_shutting_down = False
+                self._update_tray_menu()
+                return
+
+        # 不取消低电量巡检任务，作为备份（系统已关闭，也不影响下次启动）
 
     # ======================== 系统托盘 ========================
 
