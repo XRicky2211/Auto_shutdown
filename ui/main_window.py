@@ -948,7 +948,7 @@ class MainWindow(QMainWindow):
         self._sleep_prevention_active = False
         allow_sleep()
         try:
-            subprocess.Popen(TASK_COMMANDS[self.task_type])
+            subprocess.Popen(TASK_COMMANDS[self.task_type], creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             QMessageBox.critical(self, f"{action}失败", f"执行{action}命令时出错：\n{e}")
             self.is_shutting_down = False
@@ -973,7 +973,7 @@ class MainWindow(QMainWindow):
         self._sleep_prevention_active = False
         allow_sleep()
         try:
-            subprocess.Popen(["shutdown", "/s", "/t", "0"])
+            subprocess.Popen(["shutdown", "/s", "/t", "0"], creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             QMessageBox.critical(self, "关机失败", f"执行关机命令时出错：\n{e}")
             self.is_shutting_down = False
