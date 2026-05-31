@@ -36,6 +36,8 @@
   },
   "battery": {
     "enabled": true,
+    "warning_threshold": 30,
+    "critical_threshold": 15,
     "threshold": 30
   },
   "holiday_skip_enabled": false,
@@ -115,5 +117,6 @@
     ]
   },
   "game_mode_enabled": false,
-  "game_end_countdown": 60
+  "game_end_countdown": 60,
+  "schedule_active": false
 }

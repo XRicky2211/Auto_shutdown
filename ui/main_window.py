@@ -9,10 +9,13 @@ import subprocess
 import threading
 import winreg
 
+from typing import Optional
+
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QFrame, QDialog,
     QGraphicsDropShadowEffect, QSystemTrayIcon, QMenu, QApplication,
+    QProgressBar,
 )
 from PySide6.QtCore import Qt, QTimer, QTime, QDateTime, QDate, QRect, QSettings
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPen
@@ -21,7 +24,9 @@ from ui.timer_settings_dialog import TimerSettingsDialog
 from ui.reminder_settings_dialog import ReminderSettingsDialog
 from ui.reminder_dialog import ReminderDialog
 from core.battery_monitor import BatteryMonitor
+from core.battery_analyzer import BatteryAnalyzer
 from ui.battery_settings_dialog import BatterySettingsDialog
+from ui.low_battery_dialog import LowBatteryDialog
 from ui.schedule_plan_dialog import SchedulePlanDialog
 from ui.holiday_settings_dialog import HolidaySettingsDialog
 from core.config_manager import load_settings, save_settings
@@ -74,11 +79,14 @@ class MainWindow(QMainWindow):
         self.reminder_dialog = None
         self.is_shutting_down = False
 
-        # ---- 低电量自动关机 ----
+        # ---- 低电量自动关机（两级策略） ----
         self.low_battery_enabled = True
-        self.low_battery_threshold = 15
-        self.low_battery_warned = False
-        self.low_battery_disabled = False
+        self.low_battery_warning_threshold = 20       # 警告级阈值
+        self.low_battery_critical_threshold = 10      # 临界级阈值
+        self.low_battery_warned = False               # 警告级已触发
+        self.low_battery_critical_warned = False      # 临界级已触发
+        self.low_battery_disabled = False             # 本次禁用
+        self.low_battery_delayed_until = None         # 推迟到期时间
         self.holidays: set = set()
         self.holiday_periods: list = []
         self.holiday_skip_enabled = False
@@ -164,6 +172,19 @@ class MainWindow(QMainWindow):
 
         self.battery_label = QLabel("当前电量：--")
         card_layout.addWidget(self.battery_label)
+
+        # ---- 电池电量进度条 ----
+        self.battery_progress = QProgressBar()
+        self.battery_progress.setRange(0, 100)
+        self.battery_progress.setValue(0)
+        self.battery_progress.setTextVisible(False)
+        self.battery_progress.setFixedHeight(14)
+        card_layout.addWidget(self.battery_progress)
+
+        # ---- 电池预估时间标签 ----
+        self.battery_estimate_label = QLabel("")
+        self.battery_estimate_label.setStyleSheet("color: #868E96; font-size: 12px;")
+        card_layout.addWidget(self.battery_estimate_label)
 
         self.holiday_label = QLabel("今日节假日，自动跳过关机")
         self.holiday_label.setStyleSheet("color: #E74C3C; font-weight: bold;")
@@ -1016,8 +1037,9 @@ class MainWindow(QMainWindow):
     # ======================== 低电量自动关机 ========================
 
     def _setup_battery_monitor(self):
-        """创建电池检测器（每 3 分钟检测一次）"""
+        """创建电池检测器（初始为正常频率）"""
         self.battery_monitor = BatteryMonitor()
+        self.battery_analyzer = BatteryAnalyzer()
         self.battery_timer = QTimer(self)
         self.battery_timer.setInterval(180000)  # 3 分钟
         self.battery_timer.timeout.connect(self._check_battery)
@@ -1025,64 +1047,230 @@ class MainWindow(QMainWindow):
         self._check_battery()
 
     def _check_battery(self):
-        """检测电池状态并更新显示，条件满足时弹出低电量警告"""
+        """两级低电量检测 + 智能频率调整 + 趋势记录
+
+        状态机逻辑：
+        1. 记录采样到 BatteryAnalyzer
+        2. 更新界面（进度条、颜色、文字、预估时间）
+        3. 如果整体禁用 → 不检测
+        4. 如果本次已禁用 → 只更新界面
+        5. 如果仍在推迟期 → 跳过检测
+        6. 接通电源 → 重置所有状态
+        7. 临界检测（≤ critical_threshold 且未警告过）→ critical 弹窗
+        8. 警告检测（≤ warning_threshold 且未警告过）→ warning 弹窗
+        9. 动态调整检测频率
+        """
         status = self.battery_monitor.get_status()
         if status is None:
-            self.battery_label.setText("当前电量：--")
+            self._update_battery_display(None)
             return
 
         percentage = status["percentage"]
         plugged = status["power_plugged"]
 
-        # 更新显示
-        if plugged:
-            self.battery_label.setText(f"当前电量：{percentage:.0f}% (已接通)")
-        else:
-            self.battery_label.setText(f"当前电量：{percentage:.0f}% (未接通)")
+        # 1. 记录采样点
+        self.battery_analyzer.record(percentage, plugged)
 
-        # 检查是否需要低电量警告
-        if self.low_battery_enabled and not self.low_battery_disabled:
-            if not plugged and percentage <= self.low_battery_threshold:
-                if not self.low_battery_warned:
-                    self._show_low_battery_warning(percentage)
+        # 2. 更新界面显示
+        self._update_battery_display(status)
+
+        # 3. 如果整体禁用，不做任何检测
+        if not self.low_battery_enabled:
+            self._update_battery_poll_interval(percentage)
+            return
+
+        # 4. 如果本次已禁用，只更新显示不弹窗
+        if self.low_battery_disabled:
+            self._update_battery_poll_interval(percentage)
+            return
+
+        # 5. 如果仍在推迟期，不检测
+        if self.low_battery_delayed_until is not None:
+            now = QDateTime.currentDateTime()
+            if now < self.low_battery_delayed_until:
+                return
             else:
-                # 条件不满足时重置警告，以便下次再次触发
+                # 推迟期结束，重置警告状态，下次检测到低电量会重新弹窗
+                self.low_battery_delayed_until = None
                 self.low_battery_warned = False
+                self.low_battery_critical_warned = False
 
-    def _show_low_battery_warning(self, percentage: float):
-        """弹出低电量警告弹窗"""
-        self.low_battery_warned = True
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("低电量提醒")
-        msg.setText(f"电池电量仅剩 {percentage:.0f}%，且未接通电源。")
-        msg.setInformativeText("建议立即保存工作。")
+        # 6. 接通电源 → 重置所有状态
+        if plugged:
+            self._reset_battery_warning_state()
+            self._update_battery_poll_interval(percentage)
+            return
 
-        msg.addButton("暂不处理", QMessageBox.RejectRole)
-        shutdown_btn = msg.addButton("立即关机", QMessageBox.AcceptRole)
-        disable_btn = msg.addButton("本次禁用", QMessageBox.DestructiveRole)
+        # 7. 临界检测（优先级最高）
+        if (percentage <= self.low_battery_critical_threshold
+                and not self.low_battery_critical_warned):
+            # 同时抑制 warning 级弹窗
+            self.low_battery_warned = True
+            self._show_low_battery_warning(percentage, level="critical")
+            return
 
-        msg.exec()
+        # 8. 警告级检测
+        if (percentage <= self.low_battery_warning_threshold
+                and not self.low_battery_warned):
+            self._show_low_battery_warning(percentage, level="warning")
+            return
 
-        if msg.clickedButton() == shutdown_btn:
+        # 9. 电量回升到阈值以上 → 恢复警告状态
+        if percentage > self.low_battery_warning_threshold:
+            self._reset_battery_warning_state()
+
+        # 10. 动态调整检测频率
+        self._update_battery_poll_interval(percentage)
+
+    def _show_low_battery_warning(self, percentage: float, level: str = "warning"):
+        """弹出自定义低电量警告弹窗
+
+        参数：
+            percentage: 当前电量百分比
+            level:      "warning" 或 "critical"
+        """
+        remaining_text = self.battery_analyzer.trend_text(percentage)
+
+        dialog = LowBatteryDialog(
+            percentage, remaining_text, level=level, parent=self
+        )
+
+        dialog.exec()
+
+        if dialog.shutdown_requested:
             self._execute_shutdown()
-        elif msg.clickedButton() == disable_btn:
+        elif dialog.session_disabled:
             self.low_battery_disabled = True
-        # "暂不处理"：不做任何事，warned 标记保持为 True 避免重复打扰
+        elif dialog.postponed:
+            # critical 级推迟
+            minutes = dialog.postponed_minutes
+            self.low_battery_delayed_until = QDateTime.currentDateTime().addSecs(minutes * 60)
+            self.low_battery_critical_warned = True  # 推迟后不再重复弹临界窗
+        else:
+            # 用户点击"我知道了"：标记警告已显示
+            if level == "warning":
+                self.low_battery_warned = True
+            else:
+                self.low_battery_critical_warned = True
+
+    # ======================== 电池显示更新 ========================
+
+    def _update_battery_display(self, status: Optional[dict]):
+        """更新电池标签、进度条、预估时间显示
+
+        参数：
+            status: get_status() 的返回值，或 None（无电池）
+        """
+        if status is None:
+            self.battery_label.setText("当前电量：--")
+            self.battery_progress.setValue(0)
+            self.battery_estimate_label.setText("")
+            return
+
+        pct = status["percentage"]
+        plugged = status["power_plugged"]
+
+        # 更新文字
+        if plugged:
+            self.battery_label.setText(f"当前电量：{pct:.0f}% (已接通)")
+            self.battery_estimate_label.setText("电源已接通")
+        else:
+            self.battery_label.setText(f"当前电量：{pct:.0f}% (未接通)")
+            # 更新预估时间
+            remaining = self.battery_analyzer.estimate_remaining_minutes(pct)
+            if remaining is not None:
+                if remaining < 60:
+                    self.battery_estimate_label.setText(
+                        f"预计可用 {max(1, remaining)} 分钟"
+                    )
+                else:
+                    h = remaining // 60
+                    m = remaining % 60
+                    self.battery_estimate_label.setText(
+                        f"预计可用 {h} 小时 {m} 分钟"
+                    )
+            else:
+                self.battery_estimate_label.setText("数据收集中...")
+
+        # 更新进度条
+        self.battery_progress.setValue(int(round(pct)))
+
+        # 进度条颜色分级
+        color = self._get_battery_color(pct)
+        self.battery_progress.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid #DDE3E9;
+                border-radius: 6px;
+                background-color: #F1F3F5;
+                text-align: center;
+                font-size: 11px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {color};
+                border-radius: 5px;
+            }}
+        """)
+
+    @staticmethod
+    def _get_battery_color(pct: float) -> str:
+        """根据电量百分比返回进度条颜色"""
+        if pct <= 10:
+            return "#E03131"   # 红色
+        elif pct <= 20:
+            return "#E8590C"   # 深橙
+        elif pct <= 30:
+            return "#FD7E14"   # 橙色
+        elif pct <= 60:
+            return "#F59F00"   # 黄色
+        else:
+            return "#40C057"   # 绿色
+
+    def _update_battery_poll_interval(self, percentage: float):
+        """根据当前电量动态调整检测频率
+
+        策略：
+        - > warning_threshold：正常频率（180 秒）
+        - warning_threshold ~ critical_threshold：加快频率（30 秒）
+        - < critical_threshold：高频率监控（10 秒）
+        """
+        if percentage <= self.low_battery_critical_threshold:
+            interval = 10000       # 10 秒
+        elif percentage <= self.low_battery_warning_threshold:
+            interval = 30000       # 30 秒
+        else:
+            interval = 180000      # 3 分钟
+
+        if self.battery_timer.interval() != interval:
+            self.battery_timer.setInterval(interval)
+
+    def _reset_battery_warning_state(self):
+        """重置低电量警告状态（电量回升或接通电源时调用）"""
+        self.low_battery_warned = False
+        self.low_battery_critical_warned = False
+        self.low_battery_disabled = False
+        self.low_battery_delayed_until = None
+        self.battery_analyzer.clear()
+
+    # ======================== 低电量设置弹窗 ========================
 
     def _open_battery_settings(self):
-        """打开低电量设置弹窗"""
+        """打开低电量设置弹窗（传入两级阈值）"""
         dialog = BatterySettingsDialog(
             self.low_battery_enabled,
-            self.low_battery_threshold,
+            self.low_battery_warning_threshold,
+            self.low_battery_critical_threshold,
             self,
         )
         if dialog.exec() == QDialog.Accepted:
             self.low_battery_enabled = dialog.is_enabled()
-            self.low_battery_threshold = dialog.get_threshold()
+            new_warning = dialog.get_warning_threshold()
+            new_critical = dialog.get_critical_threshold()
+            # 校验：警告 > 临界
+            if new_warning > new_critical:
+                self.low_battery_warning_threshold = new_warning
+                self.low_battery_critical_threshold = new_critical
             if not self.low_battery_enabled:
-                self.low_battery_warned = False
-                self.low_battery_disabled = False
+                self._reset_battery_warning_state()
             self._save_all_settings()
 
     # ======================== 配置持久化 ========================
@@ -1131,8 +1319,17 @@ class MainWindow(QMainWindow):
         battery = cfg.get("battery", {})
         if isinstance(battery.get("enabled"), bool):
             self.low_battery_enabled = battery["enabled"]
-        if isinstance(battery.get("threshold"), int):
-            self.low_battery_threshold = battery["threshold"]
+
+        # 读取两级阈值（向后兼容：优先新字段，回退到旧 threshold）
+        wt = battery.get("warning_threshold")
+        ct = battery.get("critical_threshold")
+        if wt is not None and ct is not None:
+            self.low_battery_warning_threshold = wt
+            self.low_battery_critical_threshold = ct
+        elif isinstance(battery.get("threshold"), int):
+            old = battery["threshold"]
+            self.low_battery_warning_threshold = old
+            self.low_battery_critical_threshold = max(3, old // 2)
 
         if isinstance(cfg.get("holiday_skip_enabled"), bool):
             self.holiday_skip_enabled = cfg["holiday_skip_enabled"]
@@ -1168,7 +1365,9 @@ class MainWindow(QMainWindow):
             },
             battery={
                 "enabled": self.low_battery_enabled,
-                "threshold": self.low_battery_threshold,
+                "warning_threshold": self.low_battery_warning_threshold,
+                "critical_threshold": self.low_battery_critical_threshold,
+                "threshold": self.low_battery_warning_threshold,  # 向后兼容
             },
             holiday_skip_enabled=self.holiday_skip_enabled,
             game_mode_enabled=self.game_mode_enabled,
