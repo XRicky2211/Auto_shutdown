@@ -118,5 +118,10 @@
   },
   "game_mode_enabled": false,
   "game_end_countdown": 60,
-  "schedule_active": false
+  "schedule_active": false,
+  "brightness": {
+    "enabled": true,
+    "ac_level": 100,
+    "battery_level": 50
+  }
 }

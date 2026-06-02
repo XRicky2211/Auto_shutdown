@@ -33,6 +33,8 @@ from core.config_manager import load_settings, save_settings
 from core.holiday_api import fetch_holiday_data
 from core.game_detector import is_fullscreen_app_running
 from ui.game_mode_settings_dialog import GameModeSettingsDialog
+from core.brightness_controller import set_brightness
+from ui.widgets_dialog import WidgetsDialog
 
 # ---- 任务类型常量 ----
 TASK_TYPES = {
@@ -102,6 +104,12 @@ class MainWindow(QMainWindow):
         self.game_end_warning_shown = False
         self.game_end_msg = None
 
+        # ---- 亮度控制 ----
+        self.brightness_enabled = True
+        self.brightness_ac = 100        # 接通电源时亮度
+        self.brightness_battery = 50    # 电池供电时亮度
+        self._last_power_plugged = None # 追踪电源状态变化
+
         self._load_config()
         self._init_holidays()
         self.auto_start_enabled = self._check_auto_start()
@@ -117,6 +125,9 @@ class MainWindow(QMainWindow):
         # 开机后自动恢复每周定时任务
         if self.schedule_active:
             QTimer.singleShot(500, self._auto_resume_countdown)
+
+        # 开机后自动设置屏幕亮度（延迟 2 秒，等待系统就绪）
+        QTimer.singleShot(2000, self._apply_brightness_on_startup)
 
     # ======================== 界面创建 ========================
 
@@ -210,9 +221,14 @@ class MainWindow(QMainWindow):
         self.action_btn.clicked.connect(self._toggle_countdown)
         layout.addWidget(self.action_btn)
 
-        # ---- 底部小按钮行（开机自启 / 节假日跳过 / 低电量等设置） ----
+        # ---- 底部小按钮行（小组件 / 开机自启 / 节假日跳过 / 低电量等设置） ----
         bottom_btn_layout = QHBoxLayout()
         bottom_btn_layout.setSpacing(8)
+
+        self.widgets_btn = QPushButton("小组件")
+        self.widgets_btn.setObjectName("bottomSettingBtn")
+        self.widgets_btn.clicked.connect(self._open_widgets_dialog)
+        bottom_btn_layout.addWidget(self.widgets_btn)
 
         self.auto_start_btn = QPushButton("开机自启")
         self.auto_start_btn.setObjectName("bottomSettingBtn")
@@ -1074,6 +1090,12 @@ class MainWindow(QMainWindow):
         # 2. 更新界面显示
         self._update_battery_display(status)
 
+        # 2.5 检测电源状态变化 → 自动调整亮度
+        if self.brightness_enabled and self._last_power_plugged is not None:
+            if self._last_power_plugged != plugged:
+                self._apply_brightness_by_power_state(plugged)
+        self._last_power_plugged = plugged
+
         # 3. 如果整体禁用，不做任何检测
         if not self.low_battery_enabled:
             self._update_battery_poll_interval(percentage)
@@ -1273,6 +1295,56 @@ class MainWindow(QMainWindow):
                 self._reset_battery_warning_state()
             self._save_all_settings()
 
+    # ======================== 小组件弹窗 ========================
+
+    def _open_widgets_dialog(self):
+        """打开小组件功能清单弹窗"""
+        dialog = WidgetsDialog(
+            self.brightness_enabled,
+            self.brightness_ac,
+            self.brightness_battery,
+            self,
+        )
+        dialog.exec()
+
+        if dialog.is_brightness_changed():
+            self.brightness_enabled = dialog.get_brightness_enabled()
+            self.brightness_ac = dialog.get_brightness_ac()
+            self.brightness_battery = dialog.get_brightness_battery()
+            # 立即应用新设置
+            status = self.battery_monitor.get_status()
+            if status is None:
+                plugged = True
+            else:
+                plugged = status["power_plugged"]
+            self._apply_brightness_by_power_state(plugged)
+            self._save_all_settings()
+
+    # ======================== 亮度自动调节 ========================
+
+    def _apply_brightness_by_power_state(self, power_plugged: bool):
+        """根据电源状态设置屏幕亮度（后台线程执行，不阻塞 UI）"""
+        if not self.brightness_enabled:
+            return
+        level = self.brightness_ac if power_plugged else self.brightness_battery
+
+        def _set():
+            set_brightness(level)
+
+        threading.Thread(target=_set, daemon=True).start()
+
+    def _apply_brightness_on_startup(self):
+        """程序启动时根据当前电源状态设置一次亮度"""
+        if not self.brightness_enabled:
+            return
+        status = self.battery_monitor.get_status()
+        if status is None:
+            # 没有电池（台式机），默认使用 AC 亮度值
+            plugged = True
+        else:
+            plugged = status["power_plugged"]
+        self._apply_brightness_by_power_state(plugged)
+
     # ======================== 配置持久化 ========================
 
     def _load_config(self):
@@ -1339,6 +1411,14 @@ class MainWindow(QMainWindow):
         if isinstance(cfg.get("game_end_countdown"), int):
             self.game_end_countdown = cfg["game_end_countdown"]
 
+        brightness = cfg.get("brightness", {})
+        if isinstance(brightness.get("enabled"), bool):
+            self.brightness_enabled = brightness["enabled"]
+        if isinstance(brightness.get("ac_level"), int):
+            self.brightness_ac = brightness["ac_level"]
+        if isinstance(brightness.get("battery_level"), int):
+            self.brightness_battery = brightness["battery_level"]
+
         if isinstance(cfg.get("schedule_active"), bool):
             self.schedule_active = cfg["schedule_active"]
 
@@ -1373,4 +1453,9 @@ class MainWindow(QMainWindow):
             game_mode_enabled=self.game_mode_enabled,
             game_end_countdown=self.game_end_countdown,
             schedule_active=self.schedule_active,
+            brightness={
+                "enabled": self.brightness_enabled,
+                "ac_level": self.brightness_ac,
+                "battery_level": self.brightness_battery,
+            },
         )
