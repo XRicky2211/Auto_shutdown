@@ -842,10 +842,11 @@ class MainWindow(QMainWindow):
         dialog.show()
 
     def _delay_countdown(self, minutes: int):
-        """推迟关机"""
+        """推迟关机，同时清除已触发的提醒记录，让提醒能重新弹窗"""
         seconds = minutes * 60
         self.remaining_seconds += seconds
         self.end_time = self.end_time.addSecs(seconds)
+        self.fired_reminders.clear()
         self._update_display()
 
     # ======================== 游戏结束警告 ========================
