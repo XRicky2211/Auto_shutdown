@@ -3,7 +3,7 @@
 # 用途：关机前弹出的提醒窗口，包含 取消/推迟/立即关机 三个按钮
 # --------------------------------------------------------------------------
 
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QWidget, QSpinBox
 from PySide6.QtCore import Signal, Qt, QTimer, QDateTime
 
 
@@ -30,7 +30,7 @@ class ReminderDialog(QDialog):
         self._remaining_seconds = remaining_seconds
         self._end_time = end_time
         self.setWindowTitle(f"{action_name}提醒")
-        self.setFixedSize(360, 180)
+        self.setFixedSize(360, 220)
 
         # 让窗口保持在最前
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
@@ -106,7 +106,7 @@ class ReminderDialog(QDialog):
         btn_layout.setSpacing(10)
 
         cancel_btn = QPushButton(f"取消{self._action_name}")
-        delay_btn = QPushButton(f"推迟 {delay_minutes} 分钟")
+        delay_btn = QPushButton()
         shutdown_btn = QPushButton("确认预约")
 
         # 给按钮加一点样式
@@ -114,9 +114,29 @@ class ReminderDialog(QDialog):
             btn.setMinimumHeight(36)
         shutdown_btn.setStyleSheet("background-color: #339AF0; color: white; font-weight: bold;")
 
+        # ---- 推迟微调行 ----
+        delay_adjust_layout = QHBoxLayout()
+        delay_adjust_layout.setSpacing(4)
+
+        self.delay_spin = QSpinBox()
+        self.delay_spin.setRange(1, 999)
+        self.delay_spin.setValue(delay_minutes)
+        self.delay_spin.setSuffix(" 分钟")
+        self.delay_spin.setFixedWidth(120)
+        self.delay_spin.valueChanged.connect(
+            lambda v: delay_btn.setText(f"推迟 {v} 分钟")
+        )
+
+        delay_btn.setText(f"推迟 {delay_minutes} 分钟")
+
+        delay_adjust_layout.addStretch()
+        delay_adjust_layout.addWidget(self.delay_spin)
+        delay_adjust_layout.addStretch()
+        layout.addLayout(delay_adjust_layout)
+
         # 绑定点击事件
         cancel_btn.clicked.connect(self._on_cancelled)
-        delay_btn.clicked.connect(lambda: self._on_delayed(delay_minutes))
+        delay_btn.clicked.connect(lambda: self._on_delayed(self.delay_spin.value()))
         shutdown_btn.clicked.connect(self._on_shutdown_now)
 
         btn_layout.addWidget(cancel_btn)
