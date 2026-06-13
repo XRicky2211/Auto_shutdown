@@ -35,6 +35,8 @@ from core.game_detector import is_fullscreen_app_running
 from ui.game_mode_settings_dialog import GameModeSettingsDialog
 from core.brightness_controller import set_brightness
 from ui.widgets_dialog import WidgetsDialog
+from core.task_executor import TaskExecutor
+from core.countdown_manager import CountdownManager
 
 # ---- 任务类型常量 ----
 TASK_TYPES = {
@@ -120,6 +122,16 @@ class MainWindow(QMainWindow):
         self._setup_timer()
         self._setup_battery_monitor()
         self._update_summary()
+
+        # ---- 新引擎（Step1~3 重构） ----
+        # _use_new_engine 默认 False。
+        # 改为 True 后，倒计时核心由 CountdownManager 驱动，
+        # 任务执行由 TaskExecutor 接管。
+        self._use_new_engine = True
+        self.countdown_manager = CountdownManager(self)
+        self.task_executor = TaskExecutor()
+        self._connect_countdown_signals()
+
         self._setup_tray()
 
         # 开机后自动恢复每周定时任务
@@ -128,6 +140,11 @@ class MainWindow(QMainWindow):
 
         # 开机后自动设置屏幕亮度（延迟 2 秒，等待系统就绪）
         QTimer.singleShot(2000, self._apply_brightness_on_startup)
+
+        # 新引擎下尝试恢复未完成任务
+        if self._use_new_engine:
+            if self.countdown_manager.load_state():
+                self._on_countdown_time_updated(self.countdown_manager.remaining_seconds)
 
     # ======================== 界面创建 ========================
 
@@ -355,6 +372,11 @@ class MainWindow(QMainWindow):
         """关闭按钮隐藏到系统托盘（不退出程序）"""
         settings = QSettings("AutoShutdown", "AutoShutdownHelper")
         settings.setValue("window/geometry", self.saveGeometry())
+        if self._use_new_engine:
+            if self.countdown_manager.is_counting:
+                self.countdown_manager.save_state()
+            else:
+                self.countdown_manager.clear_state()
         self._save_all_settings()
         if hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
             self.hide()
@@ -369,6 +391,108 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self._on_tick)
+
+    # ======================== 新引擎信号连接 ========================
+
+    def _connect_countdown_signals(self):
+        """连接 CountdownManager 的信号到 UI 处理方法"""
+        cm = self.countdown_manager
+
+        cm.time_updated.connect(self._on_countdown_time_updated)
+        cm.reminder_needed.connect(self._show_reminder)
+        cm.task_due.connect(self._on_task_due)
+        cm.game_end_warning.connect(self._on_game_end_warning)
+        cm.state_changed.connect(self._on_countdown_state_changed)
+        cm.countdown_cancelled.connect(self._on_countdown_cancelled)
+        cm.countdown_started.connect(self._on_countdown_started)
+
+    def _on_countdown_time_updated(self, remaining: int):
+        """CountdownManager 倒计时更新 → UI 刷新（兼容新旧两套状态变量）"""
+        # 新引擎模式下，用 CountdownManager 的数值覆盖旧变量
+        # 这样_show_reminder、_update_display等旧 UI 方法可以正常访问
+        self.remaining_seconds = remaining
+        self.end_time = self.countdown_manager.end_time
+        self._update_display()
+
+    def _on_task_due(self, task_type: str):
+        """CountdownManager 到 0 → TaskExecutor 执行"""
+        success, err = self.task_executor.execute(task_type)
+        if not success and err != "已有任务正在执行":
+            action = TASK_TYPES.get(task_type, task_type)
+            QMessageBox.critical(self, f"{action}失败", f"执行{action}命令时出错：\n{err}")
+            self.task_executor.reset()
+
+        # 无论成功与否，重置按钮
+        self.action_btn.setText(self._get_start_btn_text())
+        self.action_btn.setStyleSheet("")
+        self.remaining_label.setText("剩余时间：--")
+        self.shutdown_time_label.setText(self._get_expected_time_label())
+        self.holiday_label.hide()
+        self.countdown_manager.clear_state()
+        self._save_all_settings()
+        self._update_tray_menu()
+
+    def _on_game_end_warning(self, task_type: str, seconds: int):
+        """CountdownManager 游戏结束警告 → UI 弹窗"""
+        # 同步游戏模式状态到 MainWindow（用于弹窗引用）
+        self.game_postponing = False
+        self.game_end_warning_shown = True
+        self._show_game_end_warning()
+
+    def _on_countdown_state_changed(self, is_counting: bool):
+        """CountdownManager 状态变化 → UI 切换按钮文字"""
+        # 同步到 MainWindow 的状态变量
+        self.is_counting = is_counting
+        if is_counting:
+            self.action_btn.setText(self._get_cancel_btn_text())
+            self.action_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #FF6B6B, stop:1 #E74C3C);
+                    border: none;
+                    border-radius: 10px;
+                    padding: 12px 0;
+                    color: #FFFFFF;
+                    font-size: 15px;
+                    font-weight: bold;
+                    min-height: 44px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #E74C3C, stop:1 #C0392B);
+                }
+                QPushButton:pressed {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #C0392B, stop:1 #A93226);
+                }
+            """)
+        else:
+            self.action_btn.setText(self._get_start_btn_text())
+            self.action_btn.setStyleSheet("")
+            self.remaining_label.setText("剩余时间：--")
+            self.shutdown_time_label.setText(self._get_expected_time_label())
+            self.holiday_label.hide()
+
+    def _on_countdown_cancelled(self):
+        """CountdownManager 取消 → UI 清理（除按钮以外的清理工作）"""
+        if self.game_end_msg:
+            self.game_end_msg.close()
+            self.game_end_msg = None
+        if self.reminder_dialog and self.reminder_dialog.isVisible():
+            self.reminder_dialog.close()
+            self.reminder_dialog = None
+        self.countdown_manager.clear_state()
+        self._update_tray_menu()
+        self._save_all_settings()
+
+    def _on_countdown_started(self):
+        """CountdownManager 启动 → UI 额外处理"""
+        if (self.current_mode == "预约模式"
+                and self._is_holiday_date(QDate.currentDate())):
+            self.holiday_label.show()
+        else:
+            self.holiday_label.hide()
+        self._update_tray_menu()
 
     # ======================== 设置摘要（底部小字） ========================
 
@@ -459,6 +583,8 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() == QDialog.Accepted:
             self.holiday_skip_enabled = dialog.is_enabled()
+            if self._use_new_engine:
+                self.countdown_manager.set_holiday_skip_enabled(self.holiday_skip_enabled)
             self._update_summary()
             # 如果倒计时运行中，刷新节假日标签显示
             if self.is_counting:
@@ -500,6 +626,10 @@ class MainWindow(QMainWindow):
             if not self.game_mode_enabled:
                 self.game_postponing = False
                 self.game_end_warning_shown = False
+            # 同步到 CountdownManager
+            if self._use_new_engine:
+                self.countdown_manager.game_mode_enabled = self.game_mode_enabled
+                self.countdown_manager.game_end_countdown = self.game_end_countdown
             self._update_game_mode_button()
             self._update_summary()
             self._save_all_settings()
@@ -532,12 +662,16 @@ class MainWindow(QMainWindow):
         if isinstance(cache, dict):
             self.holidays = set(cache.get("dates", []))
             self.holiday_periods = cache.get("periods", [])
+        if getattr(self, '_use_new_engine', False):
+            self.countdown_manager.set_holidays(self.holidays, self.holiday_periods)
 
         def _background_fetch():
             year = QDate.currentDate().year()
             h, p = fetch_holiday_data(year)
             self.holidays = h
             self.holiday_periods = p
+            if getattr(self, '_use_new_engine', False):
+                self.countdown_manager.set_holidays(h, p)
 
         threading.Thread(target=_background_fetch, daemon=True).start()
 
@@ -609,6 +743,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_countdown(self):
         """启动 / 取消 倒计时"""
+        if self._use_new_engine:
+            if not self.countdown_manager.is_counting:
+                self._start_countdown()
+            else:
+                self._cancel_countdown()
+            return
+
         if not self.is_counting:
             self._start_countdown()
         else:
@@ -659,6 +800,25 @@ class MainWindow(QMainWindow):
 
     def _start_countdown(self):
         """开始倒计时（按钮变红+文字切换）"""
+        if self._use_new_engine:
+            ok = self.countdown_manager.start_countdown(
+                mode=self.current_mode,
+                task_type=self.task_type,
+                countdown_minutes=self.countdown_minutes,
+                target_time=self.target_time,
+                schedule_plan=self.schedule_plan,
+                reminder_times=self.reminder_times,
+                delay_minutes=self.delay_minutes,
+            )
+            if not ok:
+                QMessageBox.warning(self, "时间错误", "目标时间已过，请重新设置！")
+                return
+            # 保存 schedule_active（每周定时计划）
+            if self.current_mode == "预约模式" and self.schedule_plan["type"] == "weekly":
+                self.schedule_active = True
+                self._save_all_settings()
+            return
+
         if self.current_mode == "倒计时模式":
             total_seconds = self.countdown_minutes * 60
         else:
@@ -719,6 +879,14 @@ class MainWindow(QMainWindow):
 
     def _auto_resume_countdown(self):
         """开机后自动恢复每周定时预约任务"""
+        if self._use_new_engine:
+            # 新引擎：尝试用配置启动每周定时
+            if self.is_counting or self.current_mode != "预约模式" \
+                    or self.schedule_plan["type"] != "weekly":
+                return
+            self._start_countdown()
+            return
+
         if self.is_counting:
             return
         if self.current_mode != "预约模式" or self.schedule_plan["type"] != "weekly":
@@ -729,6 +897,10 @@ class MainWindow(QMainWindow):
 
     def _cancel_countdown(self):
         """取消倒计时，重置状态（按钮恢复蓝色）"""
+        if self._use_new_engine:
+            self.countdown_manager.cancel()
+            return
+
         # 重置游戏模式状态
         self.game_postponing = False
         self.game_end_warning_shown = False
@@ -755,6 +927,10 @@ class MainWindow(QMainWindow):
 
     def _on_tick(self):
         """每秒执行一次（由 QTimer 触发）"""
+        if self._use_new_engine:
+            # 新引擎由 CountdownManager 内部的 QTimer 驱动
+            return
+
         if not self.is_counting:
             return
 
@@ -843,6 +1019,14 @@ class MainWindow(QMainWindow):
 
     def _delay_countdown(self, minutes: int):
         """推迟关机，同时清除已触发的提醒记录，让提醒能重新弹窗"""
+        if self._use_new_engine:
+            self.countdown_manager.delay(minutes)
+            # 同步状态到旧变量（供 UI 方法使用）
+            self.remaining_seconds = self.countdown_manager.remaining_seconds
+            self.end_time = self.countdown_manager.end_time
+            self._update_display()
+            return
+
         seconds = minutes * 60
         self.remaining_seconds += seconds
         self.end_time = self.end_time.addSecs(seconds)
@@ -888,6 +1072,11 @@ class MainWindow(QMainWindow):
 
     def _execute_task(self):
         """按 task_type 执行系统任务（关机/重启/注销/睡眠/休眠）"""
+        if self._use_new_engine:
+            # 新引擎下，CountdownManager.task_due 信号触发 _on_task_due，
+            # 后者调用 task_executor.execute()，不经过此路径
+            return
+
         if self.is_shutting_down:
             return
         self.is_shutting_down = True
@@ -908,6 +1097,10 @@ class MainWindow(QMainWindow):
 
     def _execute_shutdown(self):
         """始终执行关机（用于低电量等场景）"""
+        if self._use_new_engine:
+            self.task_executor.execute("shutdown")
+            return
+
         if self.is_shutting_down:
             return
         self.is_shutting_down = True
@@ -958,6 +1151,10 @@ class MainWindow(QMainWindow):
 
         self._update_tray_menu()
         self.tray_icon.show()
+
+        # 新引擎下，同步托盘菜单到最新状态
+        if self._use_new_engine and self.countdown_manager.is_counting:
+            self._update_tray_menu()
 
     def _create_tray_icon(self) -> QIcon:
         """绘制一个关机键样式的系统托盘图标"""
@@ -1038,14 +1235,28 @@ class MainWindow(QMainWindow):
 
     def _start_countdown_from_tray(self):
         """从托盘菜单启动倒计时"""
+        if self._use_new_engine:
+            if self.countdown_manager.is_counting:
+                return
+            self._start_countdown()
+            return
+
         if self.is_counting:
             return
         self._start_countdown()
 
     def _quit_app(self):
         """从托盘菜单退出程序"""
-        self.timer.stop()
-        self.is_counting = False
+        if self._use_new_engine:
+            if self.countdown_manager.is_counting:
+                self.countdown_manager.save_state()
+            else:
+                self.countdown_manager.clear_state()
+            self._save_all_settings()
+        else:
+            self.timer.stop()
+            self.is_counting = False
+
         if self.reminder_dialog and self.reminder_dialog.isVisible():
             self.reminder_dialog.close()
             self.reminder_dialog = None
