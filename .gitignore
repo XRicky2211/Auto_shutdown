@@ -21,3 +21,13 @@ __pycache__/
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# 用户个人配置（含节假日缓存、个人偏好设置）
+settings.json
+
+# 测试/废弃文件（不应进入版本控制）
+core/task_template.xml
+encoded.txt
+
+# Claude Code 项目配置（含已通过的权限列表，不同机器内容不同）
+.claude/settings.local.json

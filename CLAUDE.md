@@ -101,6 +101,16 @@ main.py                 # 入口：单实例保护 → 创建 MainWindow → 事
 - **ReminderDialog** — 取消/推迟/确认预约，实时时间刷新
 - **WidgetsDialog → BrightnessSettingsDialog** — 嵌套子弹窗
 
+### Git 远程配置
+
+使用 SSH 协议推送（已配置，无需额外操作）：
+
+```bash
+# 远程地址：git@github.com:XRicky2211/Auto_shutdown.git
+git remote -v                    # 查看当前远程
+git push origin master           # 推送至 GitHub
+```
+
 ### 注意事项
 
 - **仅支持 Windows**（Win32 API、注册表、PowerShell WMI）
