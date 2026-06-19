@@ -112,6 +112,16 @@ class MainWindow(QMainWindow):
         self.brightness_battery = 50    # 电池供电时亮度
         self._last_power_plugged = None # 追踪电源状态变化
 
+        # ---- 邮件通知 ----
+        self.email_enabled = False
+        self.email_config = {
+            "smtp_server": "smtp.163.com",
+            "port": 465,
+            "user": "",
+            "password": "",
+            "to_email": "",
+        }
+
         self._load_config()
         self._init_holidays()
         self.auto_start_enabled = self._check_auto_start()
@@ -130,6 +140,7 @@ class MainWindow(QMainWindow):
         self._use_new_engine = True
         self.countdown_manager = CountdownManager(self)
         self.task_executor = TaskExecutor()
+        self._update_task_executor_email_config()
         self._connect_countdown_signals()
 
         self._setup_tray()
@@ -416,7 +427,9 @@ class MainWindow(QMainWindow):
 
     def _on_task_due(self, task_type: str):
         """CountdownManager 到 0 → TaskExecutor 执行"""
-        success, err = self.task_executor.execute(task_type)
+        # 从 CountdownManager 状态推导触发原因
+        cause = self._derive_task_cause()
+        success, err = self.task_executor.execute(task_type, cause)
         if not success and err != "已有任务正在执行":
             action = TASK_TYPES.get(task_type, task_type)
             QMessageBox.critical(self, f"{action}失败", f"执行{action}命令时出错：\n{err}")
@@ -431,6 +444,30 @@ class MainWindow(QMainWindow):
         self.countdown_manager.clear_state()
         self._save_all_settings()
         self._update_tray_menu()
+
+    def _derive_task_cause(self) -> str:
+        """从倒计时管理器状态推导触发原因"""
+        cm = self.countdown_manager
+        mode = cm.current_mode
+
+        if mode == "倒计时模式":
+            # 倒计时模式下，如果游戏推迟过则来自游戏模式
+            if cm.game_postponing or cm.game_end_warning_shown:
+                return "countdown"
+            return "countdown"
+
+        if mode == "预约模式":
+            plan_type = cm.schedule_plan.get("type", "once")
+            cause_map = {
+                "once": "schedule_once",
+                "daily": "schedule_daily",
+                "weekdays": "schedule_weekdays",
+                "weekends": "schedule_weekends",
+                "weekly": "schedule_weekly",
+            }
+            return cause_map.get(plan_type, "schedule_once")
+
+        return ""
 
     def _on_game_end_warning(self, task_type: str, seconds: int):
         """CountdownManager 游戏结束警告 → UI 弹窗"""
@@ -1098,7 +1135,7 @@ class MainWindow(QMainWindow):
     def _execute_shutdown(self):
         """始终执行关机（用于低电量等场景）"""
         if self._use_new_engine:
-            self.task_executor.execute("shutdown")
+            self.task_executor.execute("shutdown", "low_battery")
             return
 
         if self.is_shutting_down:
@@ -1515,6 +1552,8 @@ class MainWindow(QMainWindow):
             self.brightness_enabled,
             self.brightness_ac,
             self.brightness_battery,
+            self.email_enabled,
+            self.email_config,
             self,
         )
         dialog.exec()
@@ -1530,6 +1569,13 @@ class MainWindow(QMainWindow):
             else:
                 plugged = status["power_plugged"]
             self._apply_brightness_by_power_state(plugged)
+            self._save_all_settings()
+
+        if dialog.is_email_changed():
+            self.email_enabled = dialog.get_email_enabled()
+            self.email_config = dialog.get_email_config()
+            # 更新 TaskExecutor 的邮件配置
+            self._update_task_executor_email_config()
             self._save_all_settings()
 
     # ======================== 亮度自动调节 ========================
@@ -1556,6 +1602,15 @@ class MainWindow(QMainWindow):
         else:
             plugged = status["power_plugged"]
         self._apply_brightness_by_power_state(plugged)
+
+    # ======================== 邮件通知配置 ========================
+
+    def _update_task_executor_email_config(self):
+        """更新 TaskExecutor 的邮件配置"""
+        self.task_executor.set_email_config(
+            self.email_enabled,
+            self.email_config,
+        )
 
     # ======================== 配置持久化 ========================
 
@@ -1631,6 +1686,20 @@ class MainWindow(QMainWindow):
         if isinstance(brightness.get("battery_level"), int):
             self.brightness_battery = brightness["battery_level"]
 
+        email = cfg.get("email_notification", {})
+        if isinstance(email.get("enabled"), bool):
+            self.email_enabled = email["enabled"]
+        if isinstance(email.get("smtp_server"), str):
+            self.email_config["smtp_server"] = email["smtp_server"]
+        if isinstance(email.get("port"), int):
+            self.email_config["port"] = email["port"]
+        if isinstance(email.get("user"), str):
+            self.email_config["user"] = email["user"]
+        if isinstance(email.get("password"), str):
+            self.email_config["password"] = email["password"]
+        if isinstance(email.get("to_email"), str):
+            self.email_config["to_email"] = email["to_email"]
+
         if isinstance(cfg.get("schedule_active"), bool):
             self.schedule_active = cfg["schedule_active"]
 
@@ -1669,5 +1738,13 @@ class MainWindow(QMainWindow):
                 "enabled": self.brightness_enabled,
                 "ac_level": self.brightness_ac,
                 "battery_level": self.brightness_battery,
+            },
+            email_notification={
+                "enabled": self.email_enabled,
+                "smtp_server": self.email_config["smtp_server"],
+                "port": self.email_config["port"],
+                "user": self.email_config["user"],
+                "password": self.email_config["password"],
+                "to_email": self.email_config["to_email"],
             },
         )

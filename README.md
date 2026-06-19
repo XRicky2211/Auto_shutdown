@@ -12,6 +12,7 @@ Windows 桌面定时关机工具，支持多种任务类型、低电量保护、
 | 📅 节假日跳过 | 接入中国节假日 API，节假日自动跳过关机 |
 | 🎮 游戏模式 | 检测全屏程序运行中自动推迟任务，游戏结束后倒计时执行 |
 | ☀ 亮度自动调节 | 根据电源状态（AC/电池）自动切换屏幕亮度，保护视力延长续航 |
+| 📧 邮件通知 | SMTP SSL 发送关机/重启/注销通知，支持多条触发原因区分、发送确认后执行任务 |
 | 🖥 系统托盘 | 关闭窗口最小化到托盘，右键菜单快速操作，支持开机自启 |
 
 ## 系统要求
@@ -44,12 +45,17 @@ python build_exe.py
 
 ## 项目结构
 
-```
+```text
 main.py                    # 入口：单实例保护 → 创建 MainWindow
 ├── ui/                    # PySide6 GUI 层
 │   ├── main_window.py     # 主窗口（卡片式布局）
+│   ├── email_settings_dialog.py # 邮件 SMTP 配置弹窗
 │   └── *_dialog.py        # 各功能设置弹窗
 └── core/                  # 业务逻辑层（不依赖 Qt）
+    ├── countdown_manager.py     # 倒计时管理器
+    ├── task_executor.py         # 统一任务执行入口
+    ├── notification/            # 邮件通知模块
+    │   └── email_sender.py      # SMTP SSL 发送 + 幂等去重
     ├── battery_monitor.py       # psutil 电池状态
     ├── battery_analyzer.py      # 放电趋势分析
     ├── brightness_controller.py # WMI 屏幕亮度控制

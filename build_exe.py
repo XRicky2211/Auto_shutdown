@@ -84,10 +84,33 @@ def main():
 
     # ====== 第一步：清理 ======
     print("[1/2] 清理旧打包文件...")
+
+    # 自动终止正在运行的旧版本（避免删除/写入权限冲突）
+    if os.path.isfile(exe_path):
+        subprocess.run(
+            ["taskkill", "/F", "/IM", exe_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(0.5)  # 等系统释放文件句柄
+
+    errors = []
     for d in (build_dir, dist_dir):
         if os.path.isdir(d):
-            shutil.rmtree(d)
-            print(f"  [OK] 已删除 {d}")
+            try:
+                shutil.rmtree(d)
+                print(f"  [OK] 已删除 {d}")
+            except PermissionError as e:
+                errors.append(str(e))
+                print(f"  [SKIP] 无法删除 {d}")
+
+    if errors:
+        print()
+        print("  [!] 清理失败，请手动关闭占用进程后重试:")
+        print(f"    taskkill /F /IM {exe_name}")
+        print(f"    rmdir /s /q \"{dist_dir}\"")
+        print(f"    rmdir /s /q \"{build_dir}\"")
+        sys.exit(1)
 
     # ====== 第二步：打包 ======
     print(f"\n[2/2] 开始打包（PyInstaller）\n")
@@ -101,28 +124,34 @@ def main():
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        encoding="utf-8",
+        encoding=sys.getfilesystemencoding(),  # Windows 上通常是 gbk，兼容中文输出
         errors="replace",
         bufsize=1,     # 行缓冲，实时读取
     )
 
     _LAST_PROGRESS = 0
 
-    # 逐行读取输出，更新进度条
-    for raw_line in proc.stdout:
-        line = raw_line.rstrip()
-        if not line:
-            continue
+    try:
+        # 逐行读取输出，更新进度条
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
 
-        pct = estimate_progress(line)
-        elapsed = time.time() - start_time
+            pct = estimate_progress(line)
+            elapsed = time.time() - start_time
 
-        # 取最后一段有用信息作为标签（去掉 "INFO: " 前缀）
-        label = re.sub(r"^\d+ INFO: ", "", line)
-        if len(label) > 50:
-            label = label[:47] + "..."
+            # 取最后一段有用信息作为标签（去掉 "INFO: " 前缀）
+            label = re.sub(r"^\d+ INFO: ", "", line)
+            if len(label) > 50:
+                label = label[:47] + "..."
 
-        draw_bar(pct, elapsed, label)
+            draw_bar(pct, elapsed, label)
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait()
+        print("\n\n[!] 已取消打包（按 Ctrl+C 中断）")
+        sys.exit(1)
 
     proc.wait()
     elapsed = time.time() - start_time

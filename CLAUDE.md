@@ -30,10 +30,13 @@ python -m PyInstaller AutoShutdownHelper.spec
 main.py                 # 入口：单实例保护 → 创建 MainWindow → 事件循环
 ├── ui/                 # PySide6 GUI 层
 │   ├── main_window.py        # 主窗口 + 旧引擎倒计时 + 低电量检测
+│   ├── email_settings_dialog.py # 邮件 SMTP 配置弹窗
 │   └── *_dialog.py           # 各功能设置弹窗（纯 UI，无业务逻辑）
 └── core/               # 业务逻辑层（不依赖 Qt，可独立测试）
     ├── countdown_manager.py   # 倒计时管理器：end_time 唯一真相源，7 个 Qt 信号
     ├── task_executor.py       # 统一任务执行入口（is_shutting_down 防重复）
+    ├── notification/          # 邮件通知模块
+    │   └── email_sender.py    # EmailSender：SMTP SSL 发送 + 幂等 task_id 去重
     ├── battery_monitor.py     # psutil 封装：电量百分比和电源状态
     ├── battery_analyzer.py    # 放电速率分析 + 剩余时间预估
     ├── brightness_controller.py # PowerShell WMI 读写屏幕亮度

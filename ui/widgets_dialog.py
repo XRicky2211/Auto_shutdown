@@ -11,29 +11,38 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 
 from ui.brightness_settings_dialog import BrightnessSettingsDialog
+from ui.email_settings_dialog import EmailSettingsDialog
 
 
 class WidgetsDialog(QDialog):
     """小组件功能清单弹窗（可扩展多个小功能区）"""
 
     def __init__(self, brightness_enabled: bool, brightness_ac: int,
-                 brightness_battery: int, parent=None):
+                 brightness_battery: int, email_enabled: bool,
+                 email_config: dict, parent=None):
         """
         参数：
             brightness_enabled:  亮度控制是否启用
             brightness_ac:       接通电源亮度值
             brightness_battery:  使用电池亮度值
+            email_enabled:       邮件通知是否启用
+            email_config:        邮件配置字典
         """
         super().__init__(parent)
         self.setWindowTitle("小组件")
-        self.setMinimumSize(420, 180)
+        self.setMinimumSize(420, 280)
 
         self._brightness_enabled = brightness_enabled
         self._brightness_ac = brightness_ac
         self._brightness_battery = brightness_battery
 
-        # 标记亮度设置是否有变更
+        # ---- 邮件通知 ----
+        self._email_enabled = email_enabled
+        self._email_config = email_config.copy()
+
+        # 标记变更
         self._brightness_changed = False
+        self._email_changed = False
 
         self._setup_ui()
         self._apply_stylesheet()
@@ -96,6 +105,47 @@ class WidgetsDialog(QDialog):
 
         layout.addWidget(card)
 
+        # ---- 邮件通知卡片 ----
+        email_card = QFrame()
+        email_card.setObjectName("widgetCard")
+        email_card_layout = QHBoxLayout(email_card)
+        email_card_layout.setContentsMargins(16, 12, 16, 12)
+        email_card_layout.setSpacing(12)
+
+        # 左侧：图标 + 文字
+        email_icon_label = QLabel("📧")
+        email_icon_label.setStyleSheet("font-size: 24px; color: #12B886;")
+        email_card_layout.addWidget(email_icon_label)
+
+        email_text_layout = QVBoxLayout()
+        email_text_layout.setSpacing(2)
+
+        email_name_label = QLabel("邮件通知")
+        email_name_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #343A40;")
+
+        email_desc_label = QLabel("关机/重启时发送邮件通知")
+        email_desc_label.setStyleSheet("font-size: 11px; color: #868E96;")
+        email_desc_label.setWordWrap(True)
+
+        email_text_layout.addWidget(email_name_label)
+        email_text_layout.addWidget(email_desc_label)
+        email_card_layout.addLayout(email_text_layout, 1)
+
+        # 右侧：设置按钮
+        self.email_btn = QPushButton("设置")
+        self.email_btn.setObjectName("widgetSettingBtn")
+        self.email_btn.clicked.connect(self._open_email_settings)
+        email_card_layout.addWidget(self.email_btn)
+
+        # 卡片阴影
+        email_shadow = QGraphicsDropShadowEffect()
+        email_shadow.setBlurRadius(16)
+        email_shadow.setColor(QColor(0, 0, 0, 15))
+        email_shadow.setOffset(0, 2)
+        email_card.setGraphicsEffect(email_shadow)
+
+        layout.addWidget(email_card)
+
         # ---- 预留：更多小组件可在此处追加卡片 ----
 
         layout.addStretch()
@@ -156,12 +206,18 @@ class WidgetsDialog(QDialog):
 
     def _update_status_label(self):
         """刷新底部状态文字"""
+        parts = []
         if self._brightness_enabled:
-            self.status_label.setText(
-                f"亮度控制已启用 ｜  AC: {self._brightness_ac}%  ｜  电池: {self._brightness_battery}%"
-            )
+            parts.append(f"亮度控制已启用 ｜ AC: {self._brightness_ac}% ｜ 电池: {self._brightness_battery}%")
         else:
-            self.status_label.setText("亮度控制已禁用")
+            parts.append("亮度控制已禁用")
+
+        if self._email_enabled:
+            parts.append("邮件通知已启用")
+        else:
+            parts.append("邮件通知已禁用")
+
+        self.status_label.setText(" ｜ ".join(parts))
 
     # ======================== 打开亮度设置 ========================
 
@@ -191,6 +247,48 @@ class WidgetsDialog(QDialog):
 
             self._update_status_label()
 
+    # ======================== 打开邮件设置 ========================
+
+    def _open_email_settings(self):
+        """打开邮件通知设置子弹窗"""
+        dialog = EmailSettingsDialog(
+            self._email_enabled,
+            self._email_config.get("smtp_server", "smtp.163.com"),
+            self._email_config.get("port", 465),
+            self._email_config.get("user", ""),
+            self._email_config.get("password", ""),
+            self._email_config.get("to_email", ""),
+            self,
+        )
+        if dialog.exec() == QDialog.Accepted:
+            new_enabled = dialog.is_enabled()
+            new_smtp = dialog.get_smtp_server()
+            new_port = dialog.get_port()
+            new_user = dialog.get_user()
+            new_password = dialog.get_password()
+            new_to = dialog.get_to_email()
+
+            changed = (
+                new_enabled != self._email_enabled
+                or new_smtp != self._email_config.get("smtp_server")
+                or new_port != self._email_config.get("port")
+                or new_user != self._email_config.get("user")
+                or new_password != self._email_config.get("password")
+                or new_to != self._email_config.get("to_email")
+            )
+            if changed:
+                self._email_changed = True
+                self._email_enabled = new_enabled
+                self._email_config = {
+                    "smtp_server": new_smtp,
+                    "port": new_port,
+                    "user": new_user,
+                    "password": new_password,
+                    "to_email": new_to,
+                }
+
+            self._update_status_label()
+
     # ======================== 外部接口 ========================
 
     def is_brightness_changed(self) -> bool:
@@ -205,3 +303,13 @@ class WidgetsDialog(QDialog):
 
     def get_brightness_battery(self) -> int:
         return self._brightness_battery
+
+    def is_email_changed(self) -> bool:
+        """邮件设置是否有变更"""
+        return self._email_changed
+
+    def get_email_enabled(self) -> bool:
+        return self._email_enabled
+
+    def get_email_config(self) -> dict:
+        return self._email_config.copy()

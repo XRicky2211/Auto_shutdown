@@ -6,6 +6,10 @@
 
 import ctypes
 import subprocess
+import time
+from datetime import datetime
+
+from core.notification.email_sender import EmailSender
 
 
 # ---- 5 种任务类型的命令映射 ----
@@ -28,19 +32,35 @@ class TaskExecutor:
     - 防止同一任务被重复执行（is_shutting_down 标志）
     - 睡眠使用 Win32 SetSuspendState，不经过 rundll32
     - 所有任务静默执行，不触发 Windows 系统提示
+    - 执行关机/重启/注销后发送邮件通知（可选）
     """
 
     def __init__(self):
         self.is_shutting_down = False
+        self.email_enabled = False
+        self.email_config = None
 
     # ======================== 公共接口 ========================
 
-    def execute(self, task_type: str):
+    def set_email_config(self, enabled: bool, config: dict):
+        """设置邮件通知配置
+
+        参数：
+            enabled: 是否启用邮件通知
+            config: 邮件配置字典
+        """
+        self.email_enabled = enabled
+        self.email_config = config
+
+    def execute(self, task_type: str, cause: str = ""):
         """执行指定类型的系统任务
 
         参数：
             task_type: "shutdown" / "restart" / "logout" /
                        "sleep"    / "hibernate"
+            cause:     触发原因（countdown / schedule_once / schedule_daily /
+                       schedule_weekdays / schedule_weekends / schedule_weekly /
+                       low_battery），仅用于邮件正文区分
         返回：
             (success: bool, error_msg: str)
         """
@@ -49,11 +69,24 @@ class TaskExecutor:
 
         self.is_shutting_down = True
 
+        # 生成唯一 task_id，用于邮件幂等发送
+        task_id = f"{task_type}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        # ---- 所有任务：先确保邮件发送成功 ----
+        # 一直重试直到邮件成功（没有超时），用户收到确认后再执行
+        if not self._send_email_until_success(task_type, task_id, cause):
+            self.is_shutting_down = False
+            return False, "邮件发送失败，无法执行系统任务"
+
+        # ---- 邮件已确认成功，等待 5 秒再执行系统任务 ----
+        time.sleep(5)
+
         try:
             if task_type == "sleep":
                 self._execute_sleep()
             else:
                 self._execute_command(task_type)
+
             return True, ""
         except Exception as e:
             self.is_shutting_down = False
@@ -63,11 +96,37 @@ class TaskExecutor:
         """重置执行状态（供外部在任务失败或取消时调用）"""
         self.is_shutting_down = False
 
-    def force_shutdown(self):
+    def force_shutdown(self, cause: str = ""):
         """始终执行关机（用于低电量等紧急场景）"""
-        return self.execute("shutdown")
+        return self.execute("shutdown", cause)
 
     # ======================== 内部实现 ========================
+
+    def _send_email_until_success(self, task_type: str, task_id: str,
+                                   cause: str = "") -> bool:
+        """持续重试发送邮件，直到成功（无超时）"""
+        if not self.email_enabled or not self.email_config:
+            return True  # 未启用视为成功
+
+        time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sender = EmailSender(
+            self.email_config.get("smtp_server", "smtp.163.com"),
+            self.email_config.get("port", 465),
+            self.email_config.get("user", ""),
+            self.email_config.get("password", ""),
+            self.email_config.get("to_email", ""),
+        )
+
+        while True:
+            if sender.send_with_retry(
+                task_type, time_str, task_id, cause,
+                max_retries=3,
+                retry_delay=3.0,
+            ):
+                return True
+
+            # 重试一轮失败后，等几秒再试
+            time.sleep(5)
 
     @staticmethod
     def _execute_command(task_type: str):
