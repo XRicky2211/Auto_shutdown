@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor
 
 from ui.brightness_settings_dialog import BrightnessSettingsDialog
 from ui.email_settings_dialog import EmailSettingsDialog
+from ui.anti_sleep_settings_dialog import AntiSleepSettingsDialog
 
 
 class WidgetsDialog(QDialog):
@@ -19,7 +20,8 @@ class WidgetsDialog(QDialog):
 
     def __init__(self, brightness_enabled: bool, brightness_ac: int,
                  brightness_battery: int, email_enabled: bool,
-                 email_config: dict, parent=None):
+                 email_config: dict, anti_sleep_enabled: bool = False,
+                 anti_sleep_block_display: bool = False, parent=None):
         """
         参数：
             brightness_enabled:  亮度控制是否启用
@@ -27,10 +29,12 @@ class WidgetsDialog(QDialog):
             brightness_battery:  使用电池亮度值
             email_enabled:       邮件通知是否启用
             email_config:        邮件配置字典
+            anti_sleep_enabled:  防休眠是否启用
+            anti_sleep_block_display: 防休眠是否阻止显示器关闭
         """
         super().__init__(parent)
         self.setWindowTitle("小组件")
-        self.setMinimumSize(420, 280)
+        self.setMinimumSize(420, 340)
 
         self._brightness_enabled = brightness_enabled
         self._brightness_ac = brightness_ac
@@ -40,9 +44,14 @@ class WidgetsDialog(QDialog):
         self._email_enabled = email_enabled
         self._email_config = email_config.copy()
 
+        # ---- 防休眠 ----
+        self._anti_sleep_enabled = anti_sleep_enabled
+        self._anti_sleep_block_display = anti_sleep_block_display
+
         # 标记变更
         self._brightness_changed = False
         self._email_changed = False
+        self._anti_sleep_changed = False
 
         self._setup_ui()
         self._apply_stylesheet()
@@ -146,6 +155,47 @@ class WidgetsDialog(QDialog):
 
         layout.addWidget(email_card)
 
+        # ---- 防休眠卡片 ----
+        anti_sleep_card = QFrame()
+        anti_sleep_card.setObjectName("widgetCard")
+        anti_sleep_layout = QHBoxLayout(anti_sleep_card)
+        anti_sleep_layout.setContentsMargins(16, 12, 16, 12)
+        anti_sleep_layout.setSpacing(12)
+
+        # 左侧：图标 + 文字
+        anti_sleep_icon = QLabel("💤")
+        anti_sleep_icon.setStyleSheet("font-size: 24px; color: #7950F2;")
+        anti_sleep_layout.addWidget(anti_sleep_icon)
+
+        anti_sleep_text_layout = QVBoxLayout()
+        anti_sleep_text_layout.setSpacing(2)
+
+        anti_sleep_name = QLabel("防休眠保护")
+        anti_sleep_name.setStyleSheet("font-size: 14px; font-weight: bold; color: #343A40;")
+
+        anti_sleep_desc = QLabel("任务运行中阻止系统进入睡眠/锁屏状态")
+        anti_sleep_desc.setStyleSheet("font-size: 11px; color: #868E96;")
+        anti_sleep_desc.setWordWrap(True)
+
+        anti_sleep_text_layout.addWidget(anti_sleep_name)
+        anti_sleep_text_layout.addWidget(anti_sleep_desc)
+        anti_sleep_layout.addLayout(anti_sleep_text_layout, 1)
+
+        # 右侧：设置按钮
+        self.anti_sleep_btn = QPushButton("设置")
+        self.anti_sleep_btn.setObjectName("widgetSettingBtn")
+        self.anti_sleep_btn.clicked.connect(self._open_anti_sleep_settings)
+        anti_sleep_layout.addWidget(self.anti_sleep_btn)
+
+        # 卡片阴影
+        anti_sleep_shadow = QGraphicsDropShadowEffect()
+        anti_sleep_shadow.setBlurRadius(16)
+        anti_sleep_shadow.setColor(QColor(0, 0, 0, 15))
+        anti_sleep_shadow.setOffset(0, 2)
+        anti_sleep_card.setGraphicsEffect(anti_sleep_shadow)
+
+        layout.addWidget(anti_sleep_card)
+
         # ---- 预留：更多小组件可在此处追加卡片 ----
 
         layout.addStretch()
@@ -216,6 +266,11 @@ class WidgetsDialog(QDialog):
             parts.append("邮件通知已启用")
         else:
             parts.append("邮件通知已禁用")
+
+        if self._anti_sleep_enabled:
+            parts.append("防休眠保护已启用")
+        else:
+            parts.append("防休眠保护已禁用")
 
         self.status_label.setText(" ｜ ".join(parts))
 
@@ -289,7 +344,41 @@ class WidgetsDialog(QDialog):
 
             self._update_status_label()
 
+    # ======================== 打开防休眠设置 ========================
+
+    def _open_anti_sleep_settings(self):
+        """打开防休眠设置子弹窗"""
+        dialog = AntiSleepSettingsDialog(
+            self._anti_sleep_enabled,
+            self._anti_sleep_block_display,
+            self,
+        )
+        if dialog.exec() == QDialog.Accepted:
+            new_enabled = dialog.is_enabled()
+            new_block_display = dialog.get_block_display()
+
+            changed = (
+                new_enabled != self._anti_sleep_enabled
+                or new_block_display != self._anti_sleep_block_display
+            )
+            if changed:
+                self._anti_sleep_changed = True
+                self._anti_sleep_enabled = new_enabled
+                self._anti_sleep_block_display = new_block_display
+
+            self._update_status_label()
+
     # ======================== 外部接口 ========================
+
+    def is_anti_sleep_changed(self) -> bool:
+        """防休眠设置是否有变更"""
+        return self._anti_sleep_changed
+
+    def get_anti_sleep_enabled(self) -> bool:
+        return self._anti_sleep_enabled
+
+    def get_anti_sleep_block_display(self) -> bool:
+        return self._anti_sleep_block_display
 
     def is_brightness_changed(self) -> bool:
         """亮度设置是否有变更"""
@@ -299,9 +388,6 @@ class WidgetsDialog(QDialog):
         return self._brightness_enabled
 
     def get_brightness_ac(self) -> int:
-        return self._brightness_ac
-
-    def get_brightness_battery(self) -> int:
         return self._brightness_battery
 
     def is_email_changed(self) -> bool:

@@ -37,6 +37,7 @@ from core.brightness_controller import set_brightness
 from ui.widgets_dialog import WidgetsDialog
 from core.task_executor import TaskExecutor
 from core.countdown_manager import CountdownManager
+from core.anti_sleep import AntiSleepManager
 
 # ---- 任务类型常量 ----
 TASK_TYPES = {
@@ -122,6 +123,10 @@ class MainWindow(QMainWindow):
             "to_email": "",
         }
 
+        # ---- 防休眠保护 ----
+        self.anti_sleep_enabled = False
+        self.anti_sleep_block_display = False
+
         self._load_config()
         self._init_holidays()
         self.auto_start_enabled = self._check_auto_start()
@@ -132,6 +137,7 @@ class MainWindow(QMainWindow):
         self._setup_timer()
         self._setup_battery_monitor()
         self._update_summary()
+        self._update_widgets_status()
 
         # ---- 新引擎（Step1~3 重构） ----
         # _use_new_engine 默认 False。
@@ -142,6 +148,10 @@ class MainWindow(QMainWindow):
         self.task_executor = TaskExecutor()
         self._update_task_executor_email_config()
         self._connect_countdown_signals()
+
+        # ---- 防休眠管理器 ----
+        self.anti_sleep_manager = AntiSleepManager()
+        self._update_anti_sleep_state()
 
         self._setup_tray()
 
@@ -240,6 +250,42 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(card)
 
+        # ---- 小组件状态卡片 ----
+        self.widgets_card = QFrame()
+        self.widgets_card.setObjectName("widgetsCard")
+        widgets_card_layout = QHBoxLayout(self.widgets_card)
+        widgets_card_layout.setContentsMargins(16, 10, 16, 10)
+        widgets_card_layout.setSpacing(18)
+
+        self.widgets_status_labels = {}
+        widgets_config = [
+            ("brightness", "☀", "亮度控制"),
+            ("email", "📧", "邮件通知"),
+            ("anti_sleep", "💤", "防休眠"),
+        ]
+        for key, icon, name in widgets_config:
+            w_layout = QHBoxLayout()
+            w_layout.setSpacing(4)
+            icon_label = QLabel(icon)
+            icon_label.setStyleSheet("font-size: 14px;")
+            status_label = QLabel(name + "：启用")
+            status_label.setStyleSheet("color: #339AF0; font-size: 11px; font-weight: bold;")
+            self.widgets_status_labels[key] = status_label
+            w_layout.addWidget(icon_label)
+            w_layout.addWidget(status_label)
+            widgets_card_layout.addLayout(w_layout)
+
+        widgets_card_layout.addStretch()
+
+        # 卡片阴影
+        widgets_shadow = QGraphicsDropShadowEffect()
+        widgets_shadow.setBlurRadius(16)
+        widgets_shadow.setColor(QColor(0, 0, 0, 12))
+        widgets_shadow.setOffset(0, 2)
+        self.widgets_card.setGraphicsEffect(widgets_shadow)
+
+        layout.addWidget(self.widgets_card)
+
         # ---- 弹性空间，让按钮沉底 ----
         layout.addStretch()
 
@@ -328,6 +374,11 @@ class MainWindow(QMainWindow):
                 color: #343A40;
                 font-size: 14px;
                 padding: 4px 0;
+            }
+            QFrame#widgetsCard {
+                background-color: #FFFFFF;
+                border: 1px solid #DDE3E9;
+                border-radius: 10px;
             }
             QPushButton#actionBtn {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -480,6 +531,10 @@ class MainWindow(QMainWindow):
         """CountdownManager 状态变化 → UI 切换按钮文字"""
         # 同步到 MainWindow 的状态变量
         self.is_counting = is_counting
+
+        # 防休眠：倒计时运行时开启，停止时关闭
+        self._update_anti_sleep_state()
+
         if is_counting:
             self.action_btn.setText(self._get_cancel_btn_text())
             self.action_btn.setStyleSheet("""
@@ -532,6 +587,32 @@ class MainWindow(QMainWindow):
         self._update_tray_menu()
 
     # ======================== 设置摘要（底部小字） ========================
+
+    def _update_widgets_status(self):
+        """刷新小组件状态卡片的文字"""
+        # 亮度控制
+        if self.brightness_enabled:
+            self.widgets_status_labels["brightness"].setText("亮度控制：启用")
+            self.widgets_status_labels["brightness"].setStyleSheet("color: #339AF0; font-size: 11px; font-weight: bold;")
+        else:
+            self.widgets_status_labels["brightness"].setText("亮度控制：禁用")
+            self.widgets_status_labels["brightness"].setStyleSheet("color: #868E96; font-size: 11px;")
+
+        # 邮件通知
+        if self.email_enabled:
+            self.widgets_status_labels["email"].setText("邮件通知：启用")
+            self.widgets_status_labels["email"].setStyleSheet("color: #339AF0; font-size: 11px; font-weight: bold;")
+        else:
+            self.widgets_status_labels["email"].setText("邮件通知：禁用")
+            self.widgets_status_labels["email"].setStyleSheet("color: #868E96; font-size: 11px;")
+
+        # 防休眠保护
+        if self.anti_sleep_enabled:
+            self.widgets_status_labels["anti_sleep"].setText("防休眠：启用")
+            self.widgets_status_labels["anti_sleep"].setStyleSheet("color: #339AF0; font-size: 11px; font-weight: bold;")
+        else:
+            self.widgets_status_labels["anti_sleep"].setText("防休眠：禁用")
+            self.widgets_status_labels["anti_sleep"].setStyleSheet("color: #868E96; font-size: 11px;")
 
     @property
     def _task_action_name(self) -> str:
@@ -1554,6 +1635,8 @@ class MainWindow(QMainWindow):
             self.brightness_battery,
             self.email_enabled,
             self.email_config,
+            self.anti_sleep_enabled,
+            self.anti_sleep_block_display,
             self,
         )
         dialog.exec()
@@ -1577,6 +1660,17 @@ class MainWindow(QMainWindow):
             # 更新 TaskExecutor 的邮件配置
             self._update_task_executor_email_config()
             self._save_all_settings()
+
+        if dialog.is_anti_sleep_changed():
+            self.anti_sleep_enabled = dialog.get_anti_sleep_enabled()
+            self.anti_sleep_block_display = dialog.get_anti_sleep_block_display()
+            # 如果倒计时正在运行，立即生效
+            self._update_anti_sleep_state()
+            self._save_all_settings()
+
+        # 刷新底部小组件状态摘要
+        self._update_summary()
+        self._update_widgets_status()
 
     # ======================== 亮度自动调节 ========================
 
@@ -1611,6 +1705,15 @@ class MainWindow(QMainWindow):
             self.email_enabled,
             self.email_config,
         )
+
+    # ======================== 防休眠管理 ========================
+
+    def _update_anti_sleep_state(self):
+        """根据当前配置和倒计时状态更新防休眠"""
+        if (self.anti_sleep_enabled and self.is_counting):
+            self.anti_sleep_manager.enable(self.anti_sleep_block_display)
+        else:
+            self.anti_sleep_manager.disable()
 
     # ======================== 配置持久化 ========================
 
@@ -1703,6 +1806,12 @@ class MainWindow(QMainWindow):
         if isinstance(cfg.get("schedule_active"), bool):
             self.schedule_active = cfg["schedule_active"]
 
+        anti_sleep = cfg.get("anti_sleep", {})
+        if isinstance(anti_sleep.get("enabled"), bool):
+            self.anti_sleep_enabled = anti_sleep["enabled"]
+        if isinstance(anti_sleep.get("block_display"), bool):
+            self.anti_sleep_block_display = anti_sleep["block_display"]
+
     def _save_all_settings(self):
         """将所有设置写入 JSON 文件"""
         save_settings(
@@ -1746,5 +1855,9 @@ class MainWindow(QMainWindow):
                 "user": self.email_config["user"],
                 "password": self.email_config["password"],
                 "to_email": self.email_config["to_email"],
+            },
+            anti_sleep={
+                "enabled": self.anti_sleep_enabled,
+                "block_display": self.anti_sleep_block_display,
             },
         )
