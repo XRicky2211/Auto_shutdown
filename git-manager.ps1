@@ -1,6 +1,10 @@
 #!/usr/bin/env pwsh
 #Requires -Version 7.0
 
+# 修复中文编码
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$PSDefaultParameterValues['*:Encoding'] = 'utf8'
+
 Set-Location $PSScriptRoot
 
 function Show-Menu {
@@ -77,7 +81,7 @@ function Push-ToGitHub {
     ReadKey
 }
 
-function Pull-FromGitHub {
+function Update-FromGitHub {
     Clear-Host
     Write-Host ("=" * 44) -ForegroundColor Cyan
     Write-Host "  拉取更新 (Pull)" -ForegroundColor Green
@@ -140,7 +144,7 @@ function Show-Status {
     ReadKey
 }
 
-function Branch-Manager {
+function Show-BranchMenu {
     Clear-Host
     Write-Host ("=" * 44) -ForegroundColor Cyan
     Write-Host "  分支管理" -ForegroundColor Yellow
@@ -161,7 +165,7 @@ function Branch-Manager {
         $choice = Read-Host "`n请选择"
         switch ($choice) {
             '1' { Show-BranchList }
-            '2' { Create-Branch }
+            '2' { New-Branch }
             '3' { Switch-Branch }
             '4' { Merge-Branch }
             '5' { Remove-Branch }
@@ -186,7 +190,7 @@ function Show-BranchList {
     ReadKey
 }
 
-function Create-Branch {
+function New-Branch {
     Clear-Host
     Write-Host "--- 创建新分支 ---" -ForegroundColor Cyan
 
@@ -625,11 +629,11 @@ function New-Release {
 
     # ====== 5. 选择版本递增方式 ======
     Write-Host "`n版本递增方式:" -ForegroundColor Cyan
-    Write-Host "  [1] 小版本更新 (v{0}.{1}.0)" -ForegroundColor White -f ($latestMajor, ($latestMinor + 1))
+    Write-Host ("  [1] 小版本更新 (v{0}.{1}.0)" -f $latestMajor, ($latestMinor + 1)) -ForegroundColor White
     Write-Host "      适用于新增功能 (默认)" -ForegroundColor DarkGray
-    Write-Host "  [2] 补丁更新 (v{0}.{1}.{2})" -ForegroundColor White -f ($latestMajor, $latestMinor, ($latestPatch + 1))
+    Write-Host ("  [2] 补丁更新 (v{0}.{1}.{2})" -f $latestMajor, $latestMinor, ($latestPatch + 1)) -ForegroundColor White
     Write-Host "      适用于 Bug 修复" -ForegroundColor DarkGray
-    Write-Host "  [3] 大版本更新 (v{0}.0.0)" -ForegroundColor White -f ($latestMajor + 1)
+    Write-Host ("  [3] 大版本更新 (v{0}.0.0)" -f ($latestMajor + 1)) -ForegroundColor White
     Write-Host "      适用于重大变更" -ForegroundColor DarkGray
     Write-Host "  [4] 自定义版本号" -ForegroundColor White
 
@@ -675,16 +679,16 @@ function New-Release {
     # ====== 7. 生成 Release 描述 ======
     Write-Host "`n--- Release 描述 ---" -ForegroundColor Cyan
 
-    # 自动收集自上个版本以来的提交日志
+    # 自动收集自上个版本以来的提交日志 (使用 --encoding=utf-8 避免中文乱码)
     if ($latestVersion) {
-        $commitLog = git log --oneline --abbrev=8 "$latestVersion..HEAD" 2>$null
+        $commitLog = git -c i18n.logOutputEncoding=utf-8 log --oneline --abbrev=8 "$latestVersion..HEAD" 2>$null
     } else {
-        $commitLog = git log --oneline --abbrev=8 2>$null
+        $commitLog = git -c i18n.logOutputEncoding=utf-8 log --oneline --abbrev=8 2>$null
     }
 
     Write-Host "`n自上一版本以来的提交记录:" -ForegroundColor DarkGray
     if ($commitLog) {
-        $commitLog | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        $commitLog -split "`n" | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
     } else {
         Write-Host "  (无新提交)" -ForegroundColor DarkGray
     }
@@ -704,13 +708,14 @@ function New-Release {
     }
     $defaultDesc = $suggestedDesc -join "`n"
 
-    Write-Host "`nRelease 描述 (支持多行, 空行结束):" -ForegroundColor Yellow
+    Write-Host "`nRelease 描述:" -ForegroundColor Yellow
     Write-Host "  直接回车 = 使用自动生成的内容" -ForegroundColor DarkGray
-    Write-Host "  输入 = 自定义描述" -ForegroundColor DarkGray
     Write-Host "  输入 +d 并回车 = 使用自动生成并继续编辑" -ForegroundColor DarkGray
+    Write-Host "  其他输入 = 手动逐行输入" -ForegroundColor DarkGray
+    Write-Host "  (输入 --- 单独一行结束)" -ForegroundColor DarkGray
     Write-Host ""
 
-    $descChoice = Read-Host "请选择 (回车使用自动生成 / +d 编辑 / 手动输入)"
+    $descChoice = Read-Host "请选择 (回车默认 / +d 编辑 / 手动输入)"
 
     $releaseNotes = ""
     if ([string]::IsNullOrWhiteSpace($descChoice)) {
@@ -720,7 +725,6 @@ function New-Release {
         # 自动生成后允许编辑
         Write-Host "`n请在下面输入描述 (输入 --- 单独一行结束):" -ForegroundColor Yellow
         Write-Host $defaultDesc -ForegroundColor DarkGray
-        Write-Host "---" -ForegroundColor DarkGray
         $lines = @()
         while ($true) {
             $line = Read-Host
@@ -744,22 +748,22 @@ function New-Release {
         $releaseNotes = $lines -join "`n"
     }
 
+    # ====== 8. Release 预览 ======
+    $branch = git branch --show-current
     Write-Host "`n" ("=" * 44) -ForegroundColor Cyan
     Write-Host "  Release 预览" -ForegroundColor Green
     Write-Host ("=" * 44) -ForegroundColor Cyan
     Write-Host "  标签: " -NoNewline; Write-Host "$newTag" -ForegroundColor Green
-    Write-Host "  目标: " -NoNewline; Write-Host "master" -ForegroundColor Cyan
+    Write-Host "  目标: " -NoNewline; Write-Host "$branch" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  描述:" -ForegroundColor Cyan
     $releaseNotes -split "`n" | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
     Write-Host ""
 
-    # ====== 8. 确认执行 ======
+    # ====== 9. 确认并推送当前分支 ======
     $confirm = Read-Host "确认创建并推送 Release $newTag ? (y/n)"
     if ($confirm -notin 'y','Y') { Write-Host "已取消." -ForegroundColor DarkGray; ReadKey; return }
 
-    # ====== 9. 推送当前分支 ======
-    $branch = git branch --show-current
     Write-Host "`n[1/3] 推送到 origin/$branch ..." -ForegroundColor Yellow
     git push origin "$branch"
     if ($LASTEXITCODE -ne 0) { Write-Host "[!] 推送失败" -ForegroundColor Red; ReadKey; return }
@@ -888,9 +892,9 @@ do {
     $choice = Read-Host "请输入选项"
     switch ($choice) {
         '1' { Push-ToGitHub }
-        '2' { Pull-FromGitHub }
+        '2' { Update-FromGitHub }
         '3' { Show-Status }
-        '4' { Branch-Manager }
+        '4' { Show-BranchMenu }
         '5' { Reset-Version }
         '6' { Remove-History }
         '7' { Build-Project }
