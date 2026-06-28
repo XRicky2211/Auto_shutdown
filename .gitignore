@@ -29,5 +29,11 @@ settings.json
 core/task_template.xml
 encoded.txt
 
+# 网络诊断日志
+network_repair_logs/
+
+# Windows 系统伪设备文件
+$null
+
 # Claude Code 项目配置（含已通过的权限列表，不同机器内容不同）
 .claude/settings.local.json

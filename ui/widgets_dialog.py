@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor
 from ui.brightness_settings_dialog import BrightnessSettingsDialog
 from ui.email_settings_dialog import EmailSettingsDialog
 from ui.anti_sleep_settings_dialog import AntiSleepSettingsDialog
+from ui.network_repair_dialog import NetworkRepairDialog
 
 
 class WidgetsDialog(QDialog):
@@ -34,7 +35,7 @@ class WidgetsDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("小组件")
-        self.setMinimumSize(420, 340)
+        self.setMinimumSize(420, 420)
 
         self._brightness_enabled = brightness_enabled
         self._brightness_ac = brightness_ac
@@ -195,6 +196,47 @@ class WidgetsDialog(QDialog):
         anti_sleep_card.setGraphicsEffect(anti_sleep_shadow)
 
         layout.addWidget(anti_sleep_card)
+
+        # ---- 网络诊断与修复卡片 ----
+        network_card = QFrame()
+        network_card.setObjectName("widgetCard")
+        network_layout = QHBoxLayout(network_card)
+        network_layout.setContentsMargins(16, 12, 16, 12)
+        network_layout.setSpacing(12)
+
+        # 左侧：图标 + 文字
+        network_icon = QLabel("🌐")
+        network_icon.setStyleSheet("font-size: 24px; color: #339AF0;")
+        network_layout.addWidget(network_icon)
+
+        network_text_layout = QVBoxLayout()
+        network_text_layout.setSpacing(2)
+
+        network_name = QLabel("网络诊断与修复")
+        network_name.setStyleSheet("font-size: 14px; font-weight: bold; color: #343A40;")
+
+        network_desc = QLabel("诊断修复代理软件残留导致的网络异常")
+        network_desc.setStyleSheet("font-size: 11px; color: #868E96;")
+        network_desc.setWordWrap(True)
+
+        network_text_layout.addWidget(network_name)
+        network_text_layout.addWidget(network_desc)
+        network_layout.addLayout(network_text_layout, 1)
+
+        # 右侧：打开按钮
+        self.network_btn = QPushButton("打开")
+        self.network_btn.setObjectName("widgetSettingBtn")
+        self.network_btn.clicked.connect(self._open_network_repair)
+        network_layout.addWidget(self.network_btn)
+
+        # 卡片阴影
+        network_shadow = QGraphicsDropShadowEffect()
+        network_shadow.setBlurRadius(16)
+        network_shadow.setColor(QColor(0, 0, 0, 15))
+        network_shadow.setOffset(0, 2)
+        network_card.setGraphicsEffect(network_shadow)
+
+        layout.addWidget(network_card)
 
         # ---- 预留：更多小组件可在此处追加卡片 ----
 
@@ -367,6 +409,13 @@ class WidgetsDialog(QDialog):
                 self._anti_sleep_block_display = new_block_display
 
             self._update_status_label()
+
+    # ======================== 打开网络诊断 ========================
+
+    def _open_network_repair(self):
+        """打开网络诊断与修复弹窗"""
+        dialog = NetworkRepairDialog(self)
+        dialog.exec()
 
     # ======================== 外部接口 ========================
 
